@@ -1,0 +1,13 @@
+# dependencies
+node_modules/
+
+# env files
+.env
+.env.*
+!.env.example
+
+# OS files
+.DS_Store
+
+# Expo/CLI cache
+.expo/
