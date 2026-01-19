@@ -12,6 +12,7 @@ const { seedCarBrands } = require('./utils/seedCarBrands');
 dotenv.config({ path: path.join(__dirname, '.env') });
 
 const app = express();
+app.set('trust proxy', 1);
 app.use(cors());
 // app.use(cookieParser());
 app.use(express.json());

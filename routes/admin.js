@@ -11,6 +11,7 @@ const Review = require('../models/Review');
 const Contact = require('../models/Contact');
 const Building = require('../models/Building');
 const { logActivity } = require('../utils/activityLogger');
+const { getRequestBaseUrl } = require('../utils/requestBaseUrl');
 const bcrypt = require('bcrypt');
 
 const { Types } = require('mongoose');
@@ -403,7 +404,7 @@ router.get('/customers', async (req, res) => {
             carsByUser.set(key, list);
         });
 
-        const baseUrl = `${req.protocol}://${req.get('host')}`;
+        const baseUrl = getRequestBaseUrl(req);
 
         const customersWithSub = customers.map(customer => {
             const userIdStr = customer._id.toString();

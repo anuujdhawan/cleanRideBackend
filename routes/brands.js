@@ -1,5 +1,6 @@
 const express = require('express');
 const CarBrand = require('../models/CarBrand');
+const { getRequestBaseUrl } = require('../utils/requestBaseUrl');
 
 const router = express.Router();
 
@@ -7,7 +8,7 @@ const router = express.Router();
 router.get('/', async (req, res) => {
     try {
         const brands = await CarBrand.find().sort({ name: 1 }).lean();
-        const baseUrl = `${req.protocol}://${req.get('host')}`;
+        const baseUrl = getRequestBaseUrl(req);
 
         const payload = brands.map((brand) => ({
             id: brand._id,

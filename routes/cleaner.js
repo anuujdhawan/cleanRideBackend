@@ -6,6 +6,7 @@ const Subscription = require('../models/Subscription');
 const User = require('../models/User');
 const WashRecord = require('../models/WashRecord');
 const { logActivity } = require('../utils/activityLogger');
+const { getRequestBaseUrl } = require('../utils/requestBaseUrl');
 
 // GET /building-clients
 router.get('/building-clients', async (req, res) => {
@@ -62,7 +63,7 @@ router.get('/building-clients', async (req, res) => {
                 subscriptionByClient.set(key, sub);
             }
         });
-        const baseUrl = `${req.protocol}://${req.get('host')}`;
+        const baseUrl = getRequestBaseUrl(req);
         const result = [];
 
         for (const client of allClients) {
