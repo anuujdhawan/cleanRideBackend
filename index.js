@@ -19,33 +19,33 @@ app.use('/public', express.static(path.join(__dirname, 'public')));
 
 // Connect to MongoDB
 
-// mongoose.connect(process.env.MONGODB_URI || process.env.MONGO_URL || 'mongodb://localhost:27017/carCleanerDB')
-//   .then(async () => {
-//     console.log('Connected to MongoDB');
-//     await seedCarBrands();
-//   })
-//   .catch((err) => console.error('MongoDB connection error:', err));
+mongoose.connect(process.env.MONGODB_URI || process.env.MONGO_URL )
+  .then(async () => {
+    console.log('Connected to MongoDB'+(process.env.MONGODB_URI || process.env.MONGO_URL ));
+    await seedCarBrands();
+  })
+  .catch((err) => console.error('MongoDB connection error:', err));
 
 //serverless mongodb connection
-let isConnected = false;
-const connectToDatabase = async () => {
-  if (!isConnected) {
-    try {
-      await mongoose.connect(process.env.MONGODB_URI || process.env.MONGO_URL || 'mongodb://localhost:27017/carCleanerDB');
-      console.log('Connected to MongoDB');
-      await seedCarBrands();
-      isConnected = true;
-    } catch (error) {
-      console.error('MongoDB connection error:', error);
-    }
-  }
-};
-app.use(async (req, res, next) => {
-  if (!isConnected) {
-    await connectToDatabase();
-  }
-  next();
-});
+// let isConnected = false;
+// const connectToDatabase = async () => {
+//   if (!isConnected) {
+//     try {
+//       await mongoose.connect(process.env.MONGODB_URI || process.env.MONGO_URL || 'mongodb://localhost:27017/carCleanerDB');
+//       console.log('Connected to MongoDB');
+//       await seedCarBrands();
+//       isConnected = true;
+//     } catch (error) {
+//       console.error('MongoDB connection error:', error);
+//     }
+//   }
+// };
+// app.use(async (req, res, next) => {
+//   if (!isConnected) {
+//     await connectToDatabase();
+//   }
+//   next();
+// });
 
 // Routes
 app.use('/api/auth', authRoutes);
@@ -57,11 +57,11 @@ app.use('/api/buildings', require('./routes/buildings'));
 app.use('/api/brands', require('./routes/brands'));
 app.use('/api/payment', require('./routes/payment'));
 
-// const port = process.env.PORT || 5000;
-// app.listen(port, () => {
-//   console.log(`===============>>>Backend Server is running on port ${port}`);
-// });
+const port = process.env.PORT || 5000;
+app.listen(port, () => {
+  console.log(`===============>>>Backend Server is running on port ${port}`);
+});
 
 
 // Export the app for serverless deployment on vercel or other platforms
-module.exports = app;
+// module.exports = app;

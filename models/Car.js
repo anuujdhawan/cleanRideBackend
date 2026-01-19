@@ -27,6 +27,10 @@ const carSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  apartmentNumber: {
+    type: String,
+    required: true
+  },
   color: {
     type: String,
     required: true

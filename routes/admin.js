@@ -435,6 +435,7 @@ router.get('/customers', async (req, res) => {
                         type: primaryCar.type,
                         licensePlate: primaryCar.licensePlate,
                         color: primaryCar.color,
+                        apartmentNumber: primaryCar.apartmentNumber,
                     }
                     : null,
             };
@@ -643,7 +644,7 @@ router.get('/subscription-plans', async (req, res) => {
 // POST /subscription-plans
 router.post('/subscription-plans', async (req, res) => {
     try {
-        const { carType, planType, price, description, features } = req.body;
+        const { carType, planType, price, features } = req.body;
 
         // Check if a plan already exists for this carType and planType
         let plan = await SubscriptionPlan.findOne({ carType, planType });
@@ -651,7 +652,6 @@ router.post('/subscription-plans', async (req, res) => {
         if (plan) {
             // Update existing plan
             plan.price = price;
-            plan.description = description;
             plan.features = features;
             plan = await plan.save();
         } else {
@@ -660,7 +660,6 @@ router.post('/subscription-plans', async (req, res) => {
                 carType,
                 planType,
                 price,
-                description,
                 features
             });
             await plan.save();
@@ -681,10 +680,10 @@ router.post('/subscription-plans', async (req, res) => {
 // PUT /subscription-plans/:id
 router.put('/subscription-plans/:id', async (req, res) => {
     try {
-        const { price, description, features } = req.body;
+        const { price, features } = req.body;
         let plan = await SubscriptionPlan.findByIdAndUpdate(
             req.params.id,
-            { price, description, features, updatedAt: Date.now() },
+            { price, features, updatedAt: Date.now() },
             { new: true }
         );
         if (!plan) {

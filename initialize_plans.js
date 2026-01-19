@@ -12,7 +12,6 @@ async function initializePlans() {
         carType: 'hatchback',
         planType: 'basic',
         price: 100,
-        description: 'Basic exterior wash service',
         features: ['Exterior Wash', '3 times per week'],
         washFrequency: '3 times per week'
       },
@@ -20,7 +19,6 @@ async function initializePlans() {
         carType: 'hatchback',
         planType: 'premium',
         price: 130,
-        description: 'Premium wash with interior and tyre polishing',
         features: ['Exterior Wash', 'Interior Wash (once per month)', 'Tyre Polishing (once per month)', '3 times per week'],
         washFrequency: '3 times per week'
       },
@@ -28,7 +26,6 @@ async function initializePlans() {
         carType: 'sedan',
         planType: 'basic',
         price: 120,
-        description: 'Basic exterior wash service',
         features: ['Exterior Wash', '3 times per week'],
         washFrequency: '3 times per week'
       },
@@ -36,7 +33,6 @@ async function initializePlans() {
         carType: 'sedan',
         planType: 'premium',
         price: 150,
-        description: 'Premium wash with interior and tyre polishing',
         features: ['Exterior Wash', 'Interior Wash (once per month)', 'Tyre Polishing (once per month)', '3 times per week'],
         washFrequency: '3 times per week'
       },
@@ -44,7 +40,6 @@ async function initializePlans() {
         carType: 'mid-suv',
         planType: 'basic',
         price: 130,
-        description: 'Basic exterior wash service',
         features: ['Exterior Wash', '3 times per week'],
         washFrequency: '3 times per week'
       },
@@ -52,7 +47,6 @@ async function initializePlans() {
         carType: 'mid-suv',
         planType: 'premium',
         price: 160,
-        description: 'Premium wash with interior and tyre polishing',
         features: ['Exterior Wash', 'Interior Wash (once per month)', 'Tyre Polishing (once per month)', '3 times per week'],
         washFrequency: '3 times per week'
       },
@@ -60,7 +54,6 @@ async function initializePlans() {
         carType: 'large-suv',
         planType: 'basic',
         price: 150,
-        description: 'Basic exterior wash service',
         features: ['Exterior Wash', '3 times per week'],
         washFrequency: '3 times per week'
       },
@@ -68,7 +61,6 @@ async function initializePlans() {
         carType: 'large-suv',
         planType: 'premium',
         price: 180,
-        description: 'Premium wash with interior and tyre polishing',
         features: ['Exterior Wash', 'Interior Wash (once per month)', 'Tyre Polishing (once per month)', '3 times per week'],
         washFrequency: '3 times per week'
       }

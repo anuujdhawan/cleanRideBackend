@@ -279,7 +279,7 @@ router.get('/profile', verifyToken, async (req, res) => {
 // Create car for user
 router.post('/create-car', verifyToken, maybeUploadCarPhoto, validate(carSchema), async (req, res) => {
   try {
-    const { clientId, make, model, year, type, licensePlate, color } = req.body;
+    const { clientId, make, model, year, type, licensePlate, color, apartmentNumber } = req.body;
 
     // Verify the user is authorized to create a car for this client
     if (req.user.userId.toString() !== clientId) {
@@ -296,6 +296,7 @@ router.post('/create-car', verifyToken, maybeUploadCarPhoto, validate(carSchema)
       year,
       type: normalizeCarType(type),
       licensePlate,
+      apartmentNumber,
       color,
       photo: req.file?.filename
     });

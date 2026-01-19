@@ -108,6 +108,7 @@ router.get('/building-clients', async (req, res) => {
                         model: car.model,
                         color: car.color,
                         licensePlate: car.licensePlate,
+                        apartmentNumber: car.apartmentNumber,
                         type: car.type
                     } : null
                 });
@@ -132,6 +133,7 @@ router.get('/building-clients', async (req, res) => {
                         model: car.model,
                         color: car.color,
                         licensePlate: car.licensePlate,
+                        apartmentNumber: car.apartmentNumber,
                         type: car.type
                     } : null
                 });
@@ -154,14 +156,15 @@ router.get('/building-clients', async (req, res) => {
                         ...client.toObject(),
                         status: 'pending',
                         carPhotoUrl,
-                    carDetails: car ? {
-                        _id: car._id,
-                        make: car.make,
-                        model: car.model,
-                        color: car.color,
-                        licensePlate: car.licensePlate,
-                        type: car.type
-                    } : null
+                        carDetails: car ? {
+                            _id: car._id,
+                            make: car.make,
+                            model: car.model,
+                            color: car.color,
+                            licensePlate: car.licensePlate,
+                            apartmentNumber: car.apartmentNumber,
+                            type: car.type
+                        } : null
                     });
                 }
             }

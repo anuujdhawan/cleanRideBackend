@@ -35,6 +35,7 @@ const carSchema = z.object({
     type: z.string().min(1, 'Type is required'),
     licensePlate: z.string().min(1, 'License plate is required'),
     color: z.string().min(1, 'Color is required'),
+    apartmentNumber: z.string().min(1, 'Apartment number is required'),
 });
 
 module.exports = {
