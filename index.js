@@ -12,6 +12,7 @@ const { seedCarBrands } = require('./utils/seedCarBrands');
 dotenv.config({ path: path.join(__dirname, '.env') });
 
 const app = express();
+const isServerless = Boolean(process.env.VERCEL);
 app.set('trust proxy', 1);
 app.use(cors());
 // app.use(cookieParser());
@@ -19,13 +20,44 @@ app.use(express.json());
 app.use('/public', express.static(path.join(__dirname, 'public')));
 
 // Connect to MongoDB
+const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URL;
+let connectionPromise = null;
 
-mongoose.connect(process.env.MONGODB_URI || process.env.MONGO_URL )
-  .then(async () => {
-    console.log('Connected to MongoDB'+(process.env.MONGODB_URI || process.env.MONGO_URL ));
-    await seedCarBrands();
-  })
-  .catch((err) => console.error('MongoDB connection error:', err));
+const connectToDatabase = async () => {
+  if (mongoose.connection.readyState === 1) return;
+  if (!mongoUri) {
+    throw new Error('MONGODB_URI is not configured');
+  }
+
+  if (!connectionPromise) {
+    connectionPromise = mongoose
+      .connect(mongoUri)
+      .then(async () => {
+        console.log(`Connected to MongoDB: ${mongoUri}`);
+        await seedCarBrands();
+      })
+      .catch((err) => {
+        connectionPromise = null;
+        console.error('MongoDB connection error:', err);
+        throw err;
+      });
+  }
+
+  await connectionPromise;
+};
+
+if (isServerless) {
+  app.use(async (req, res, next) => {
+    try {
+      await connectToDatabase();
+      next();
+    } catch (error) {
+      next(error);
+    }
+  });
+} else {
+  connectToDatabase().catch(() => {});
+}
 
 //serverless mongodb connection
 // let isConnected = false;
@@ -59,10 +91,10 @@ app.use('/api/brands', require('./routes/brands'));
 app.use('/api/payment', require('./routes/payment'));
 
 const port = process.env.PORT || 5000;
-app.listen(port, () => {
-  console.log(`===============>>>Backend Server is running on port ${port}`);
-});
-
-
-// Export the app for serverless deployment on vercel or other platforms
-// module.exports = app;
+if (isServerless) {
+  module.exports = app;
+} else {
+  app.listen(port, () => {
+    console.log(`===============>>>Backend Server is running on port ${port}`);
+  });
+}
