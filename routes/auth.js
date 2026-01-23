@@ -61,7 +61,7 @@ const carPhotoUpload = multer({
 });
 
 const maybeUploadCarPhoto = (req, res, next) => {
-  if (req.is('multipart/form-data')) {
+  if (req.is('multipart')) {
     return carPhotoUpload.single('carPhoto')(req, res, next);
   }
   next();
