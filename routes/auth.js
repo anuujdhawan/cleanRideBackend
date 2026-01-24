@@ -66,15 +66,22 @@ const carPhotoUpload = multer({
 });
 
 const maybeUploadCarPhoto = (req, res, next) => {
+  console.log('maybeUploadCarPhoto middleware called');
+  console.log('Request headers:', req.headers);
   if (req.is('multipart')) {
+    console.log('Request is multipart, processing upload...');
     return carPhotoUpload.single('carPhoto')(req, res, (err) => {
       if (err) {
+        console.error('Multer error:', err);
         const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
         return res.status(status).json({ message: err.message });
       }
+      console.log('File upload processed. File:', req.file);
+      console.log('Body after upload:', req.body);
       return next();
     });
   }
+  console.log('Request is NOT multipart');
   next();
 };
 
@@ -114,6 +121,8 @@ const verifyToken = (req, res, next) => {
 
 // Register a new user
 router.post('/register', maybeUploadCarPhoto, validate(registerSchema), async (req, res) => {
+  console.log('Register endpoint hit');
+  console.log('Request body:', req.body);
   try {
     const { name, username, email, password, phone, role, buildingAssigned, adminSecretCode, buildingName, floorNumber, parkingSlot } = req.body;
     const resolvedRole = role || 'client';
@@ -299,6 +308,9 @@ router.get('/profile', verifyToken, async (req, res) => {
 
 // Create car for user
 router.post('/create-car', verifyToken, maybeUploadCarPhoto, validate(carSchema), async (req, res) => {
+  console.log('Create car endpoint hit');
+  console.log('Request body:', req.body);
+  console.log('Request file:', req.file);
   try {
     const { clientId, make, model, year, type, licensePlate, color, apartmentNumber } = req.body;
     const authUserId = req.user?.userId || req.user?.id || req.user?._id;
