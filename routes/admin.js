@@ -11,7 +11,7 @@ const Review = require('../models/Review');
 const Contact = require('../models/Contact');
 const Building = require('../models/Building');
 const { logActivity } = require('../utils/activityLogger');
-const { getRequestBaseUrl } = require('../utils/requestBaseUrl');
+const { resolveCarPhotoUrl } = require('../utils/carPhotoUrl');
 const bcrypt = require('bcrypt');
 
 const { Types } = require('mongoose');
@@ -404,15 +404,13 @@ router.get('/customers', async (req, res) => {
             carsByUser.set(key, list);
         });
 
-        const baseUrl = getRequestBaseUrl(req);
-
         const customersWithSub = customers.map(customer => {
             const userIdStr = customer._id.toString();
             const userSubs = subscriptions.filter(s => s.userId.toString() === userIdStr);
 
             const carsForUser = (carsByUser.get(userIdStr) || []).map(car => {
                 const carSub = userSubs.find(s => s.carId && s.carId.toString() === car._id.toString());
-                const photoUrl = car?.photo ? `${baseUrl}/public/car-photos/${car.photo}` : null;
+                const photoUrl = resolveCarPhotoUrl(req, car?.photo);
                 return {
                     ...car,
                     photoUrl,

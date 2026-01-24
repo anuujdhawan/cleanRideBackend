@@ -1,6 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -31,22 +32,26 @@ const normalizeCarType = (value) => {
 };
 
 const carPhotoDir = path.join(__dirname, '..', 'public', 'car-photos');
+const useMemoryStorage = Boolean(process.env.VERCEL) || process.env.CAR_PHOTO_STORAGE === 'memory';
 
 const ensureCarPhotoDir = () => {
+  if (useMemoryStorage) return;
   fs.mkdirSync(carPhotoDir, { recursive: true });
 };
 
-const carPhotoStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    ensureCarPhotoDir();
-    cb(null, carPhotoDir);
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname || '').toLowerCase() || '.jpg';
-    const unique = crypto.randomBytes(16).toString('hex');
-    cb(null, `${unique}${ext}`);
-  }
-});
+const carPhotoStorage = useMemoryStorage
+  ? multer.memoryStorage()
+  : multer.diskStorage({
+    destination: (req, file, cb) => {
+      ensureCarPhotoDir();
+      cb(null, carPhotoDir);
+    },
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname || '').toLowerCase() || '.jpg';
+      const unique = crypto.randomBytes(16).toString('hex');
+      cb(null, `${unique}${ext}`);
+    }
+  });
 
 const carPhotoUpload = multer({
   storage: carPhotoStorage,
@@ -62,9 +67,25 @@ const carPhotoUpload = multer({
 
 const maybeUploadCarPhoto = (req, res, next) => {
   if (req.is('multipart')) {
-    return carPhotoUpload.single('carPhoto')(req, res, next);
+    return carPhotoUpload.single('carPhoto')(req, res, (err) => {
+      if (err) {
+        const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+        return res.status(status).json({ message: err.message });
+      }
+      return next();
+    });
   }
   next();
+};
+
+const resolveCarPhotoValue = (file) => {
+  if (!file) return null;
+  if (file.buffer) {
+    const mimeType = file.mimetype || 'image/jpeg';
+    const encoded = file.buffer.toString('base64');
+    return `data:${mimeType};base64,${encoded}`;
+  }
+  return file.filename || null;
 };
 
 // Middleware to verify token
@@ -280,25 +301,38 @@ router.get('/profile', verifyToken, async (req, res) => {
 router.post('/create-car', verifyToken, maybeUploadCarPhoto, validate(carSchema), async (req, res) => {
   try {
     const { clientId, make, model, year, type, licensePlate, color, apartmentNumber } = req.body;
+    const authUserId = req.user?.userId || req.user?.id || req.user?._id;
+
+    if (!authUserId) {
+      return res.status(401).json({ message: 'Invalid token payload' });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(clientId)) {
+      return res.status(400).json({ message: 'Invalid client id' });
+    }
 
     // Verify the user is authorized to create a car for this client
-    if (req.user.userId.toString() !== clientId) {
+    if (authUserId.toString() !== clientId.toString()) {
       return res.status(403).json({ message: 'Unauthorized to create car for this user' });
     }
 
     const Car = require('../models/Car');
+    const parsedYear = Number(year);
+    if (!Number.isFinite(parsedYear)) {
+      return res.status(400).json({ message: 'Invalid year' });
+    }
 
     // Create new car
     const newCar = new Car({
       clientId,
       make,
       model,
-      year,
+      year: parsedYear,
       type: normalizeCarType(type),
       licensePlate,
       apartmentNumber,
       color,
-      photo: req.file?.filename
+      photo: resolveCarPhotoValue(req.file)
     });
 
     const savedCar = await newCar.save();
@@ -306,6 +340,9 @@ router.post('/create-car', verifyToken, maybeUploadCarPhoto, validate(carSchema)
     res.status(201).json({ message: 'Car created successfully', car: savedCar });
   } catch (error) {
     console.error('Create car error:', error);
+    if (error?.name === 'ValidationError' || error?.name === 'CastError') {
+      return res.status(400).json({ message: error.message });
+    }
     res.status(500).json({ message: 'Server error creating car' });
   }
 });

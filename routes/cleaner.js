@@ -6,7 +6,7 @@ const Subscription = require('../models/Subscription');
 const User = require('../models/User');
 const WashRecord = require('../models/WashRecord');
 const { logActivity } = require('../utils/activityLogger');
-const { getRequestBaseUrl } = require('../utils/requestBaseUrl');
+const { resolveCarPhotoUrl } = require('../utils/carPhotoUrl');
 
 // GET /building-clients
 router.get('/building-clients', async (req, res) => {
@@ -63,7 +63,6 @@ router.get('/building-clients', async (req, res) => {
                 subscriptionByClient.set(key, sub);
             }
         });
-        const baseUrl = getRequestBaseUrl(req);
         const result = [];
 
         for (const client of allClients) {
@@ -98,7 +97,7 @@ router.get('/building-clients', async (req, res) => {
             });
 
             if (washedToday) {
-                const carPhotoUrl = car?.photo ? `${baseUrl}/public/car-photos/${car.photo}` : null;
+                const carPhotoUrl = resolveCarPhotoUrl(req, car?.photo);
                 result.push({
                     ...client.toObject(),
                     status: 'washed',
@@ -123,7 +122,7 @@ router.get('/building-clients', async (req, res) => {
             const isScheduledToday = lastScheduled.toDateString() === now.toDateString();
 
             if (isScheduledToday) {
-                const carPhotoUrl = car?.photo ? `${baseUrl}/public/car-photos/${car.photo}` : null;
+                const carPhotoUrl = resolveCarPhotoUrl(req, car?.photo);
                 result.push({
                     ...client.toObject(),
                     status: 'scheduled',
@@ -152,7 +151,7 @@ router.get('/building-clients', async (req, res) => {
 
                 if (!washedOnSchedDay) {
                     // Missed the last scheduled day -> Pending
-                    const carPhotoUrl = car?.photo ? `${baseUrl}/public/car-photos/${car.photo}` : null;
+                    const carPhotoUrl = resolveCarPhotoUrl(req, car?.photo);
                     result.push({
                         ...client.toObject(),
                         status: 'pending',

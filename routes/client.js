@@ -13,7 +13,7 @@ const Contact = require('../models/Contact');
 const Subscription = require('../models/Subscription');
 const WashRecord = require('../models/WashRecord');
 const SubscriptionPlan = require('../models/SubscriptionPlan');
-const { getRequestBaseUrl } = require('../utils/requestBaseUrl');
+const { resolveCarPhotoUrl } = require('../utils/carPhotoUrl');
 
 let stripe = null;
 const stripeKey = process.env.STRIPE_SECRET_KEY;
@@ -100,11 +100,7 @@ const ensurePlanStripePricing = async (plan) => {
     return plan;
 };
 
-const buildCarPhotoUrl = (req, filename) => {
-    if (!filename) return null;
-    const baseUrl = getRequestBaseUrl(req);
-    return `${baseUrl}/public/car-photos/${filename}`;
-};
+const buildCarPhotoUrl = (req, photo) => resolveCarPhotoUrl(req, photo);
 
 // Middleware to verify token
 const verifyToken = (req, res, next) => {
