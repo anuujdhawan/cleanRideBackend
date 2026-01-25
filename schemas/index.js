@@ -10,6 +10,8 @@ const registerSchema = z.object({
     buildingName: z.string().optional(),
     floorNumber: z.string().optional(),
     parkingSlot: z.string().optional(),
+    secretQuestion: z.string().min(1, 'Secret question is required').optional(),
+    secretAnswer: z.string().min(1, 'Secret answer is required').optional(),
     adminSecretCode: z.string().optional(),
     buildingAssigned: z.string().optional(),
 }).refine((data) => {
@@ -20,6 +22,14 @@ const registerSchema = z.object({
 }, {
     message: "Building details are required for clients",
     path: ["buildingName"] // Attach error to buildingName
+}).refine((data) => {
+    if (data.role === 'client') {
+        return !!data.secretQuestion && !!data.secretAnswer;
+    }
+    return true;
+}, {
+    message: "Security question and answer are required for clients",
+    path: ["secretQuestion"]
 });
 
 const loginSchema = z.object({
@@ -38,8 +48,18 @@ const carSchema = z.object({
     apartmentNumber: z.string().min(1, 'Apartment number is required'),
 });
 
+const profileUpdateSchema = z.object({
+    name: z.string().min(1, 'Name is required').optional(),
+    email: z.string().email('Invalid email address').optional(),
+    phone: z.string().regex(/^\d{10,}$/, 'Phone number must be at least 10 digits and contain only numbers').optional(),
+}).refine((data) => Object.keys(data).length > 0, {
+    message: "At least one profile field is required",
+    path: ["name"]
+});
+
 module.exports = {
     registerSchema,
     loginSchema,
     carSchema,
+    profileUpdateSchema,
 };

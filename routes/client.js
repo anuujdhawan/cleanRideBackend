@@ -527,6 +527,42 @@ router.get('/cars/:carId', async (req, res) => {
     }
 });
 
+// DELETE /cars/:carId - delete a car if subscription is inactive
+router.delete('/cars/:carId', async (req, res) => {
+    try {
+        const { userId } = req.query;
+        if (!userId) return res.status(400).json({ message: 'User ID required' });
+
+        const car = await Car.findOne({ _id: req.params.carId, clientId: userId });
+        if (!car) return res.status(404).json({ message: 'Car not found' });
+
+        let subscription = await Subscription.findOne({ userId, carId: car._id })
+            .sort({ createdAt: -1 })
+            .lean();
+
+        if (!subscription) {
+            const carCount = await Car.countDocuments({ clientId: userId });
+            if (carCount === 1) {
+                subscription = await Subscription.findOne({
+                    userId,
+                    status: { $in: ['active', 'on_hold'] },
+                    $or: [{ carId: { $exists: false } }, { carId: null }]
+                }).sort({ createdAt: -1 }).lean();
+            }
+        }
+
+        const subscriptionStatus = subscription?.status || 'inactive';
+        if (['active', 'on_hold'].includes(subscriptionStatus)) {
+            return res.status(400).json({ message: 'Car cannot be deleted while subscription is active' });
+        }
+
+        await Car.deleteOne({ _id: car._id });
+        res.json({ message: 'Car deleted successfully' });
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
 // GET /subscribed-cars - list cars with active/on_hold subscriptions
 router.get('/subscribed-cars', async (req, res) => {
     try {

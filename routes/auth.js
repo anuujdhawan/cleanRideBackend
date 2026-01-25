@@ -9,7 +9,7 @@ const multer = require('multer');
 const User = require('../models/User');
 const Car = require('../models/Car');
 const validate = require('../middleware/validate');
-const { registerSchema, loginSchema, carSchema } = require('../schemas');
+const { registerSchema, loginSchema, carSchema, profileUpdateSchema } = require('../schemas');
 
 const router = express.Router();
 
@@ -115,7 +115,21 @@ const verifyToken = (req, res, next) => {
 // Register a new user
 router.post('/register', maybeUploadCarPhoto, validate(registerSchema), async (req, res) => {
   try {
-    const { name, username, email, password, phone, role, buildingAssigned, adminSecretCode, buildingName, floorNumber, parkingSlot } = req.body;
+    const {
+      name,
+      username,
+      email,
+      password,
+      phone,
+      role,
+      buildingAssigned,
+      adminSecretCode,
+      buildingName,
+      floorNumber,
+      parkingSlot,
+      secretQuestion,
+      secretAnswer
+    } = req.body;
     const resolvedRole = role || 'client';
 
     // Check if user already exists
@@ -131,6 +145,9 @@ router.post('/register', maybeUploadCarPhoto, validate(registerSchema), async (r
     // Hash password
     const saltRounds = 10;
     const hashedPassword = await bcrypt.hash(password, saltRounds);
+    const normalizedSecretQuestion = secretQuestion ? String(secretQuestion).trim() : '';
+    const normalizedSecretAnswer = secretAnswer ? String(secretAnswer).trim().toLowerCase() : '';
+    const secretAnswerHash = normalizedSecretAnswer ? await bcrypt.hash(normalizedSecretAnswer, saltRounds) : undefined;
 
     // For cleaner registration, verify admin secret code
     if (resolvedRole === 'cleaner' && adminSecretCode !== process.env.ADMIN_SECRET_CODE) {
@@ -170,6 +187,8 @@ router.post('/register', maybeUploadCarPhoto, validate(registerSchema), async (r
       username,
       email,
       password: hashedPassword,
+      secretQuestion: resolvedRole === 'client' ? normalizedSecretQuestion : undefined,
+      secretAnswer: resolvedRole === 'client' ? secretAnswerHash : undefined,
       phone,
       role: resolvedRole,
       buildingAssigned: resolvedRole === 'cleaner' ? buildingAssigned : undefined,
@@ -260,14 +279,21 @@ router.post('/login', validate(loginSchema), async (req, res) => {
 // Reset password with username/email/phone verification
 router.post('/forgot-password', async (req, res) => {
   try {
-    const { username, email, phone, newPassword } = req.body;
+    const { username, secretQuestion, secretAnswer, newPassword } = req.body;
 
-    if (!username || !email || !phone || !newPassword) {
-      return res.status(400).json({ message: 'Username, email, phone, and new password are required' });
+    if (!username || !secretQuestion || !secretAnswer || !newPassword) {
+      return res.status(400).json({ message: 'Username, secret question, secret answer, and new password are required' });
     }
 
-    const user = await User.findOne({ username, email, phone });
-    if (!user) {
+    const normalizedQuestion = String(secretQuestion).trim();
+    const user = await User.findOne({ username, secretQuestion: normalizedQuestion });
+    if (!user || !user.secretAnswer) {
+      return res.status(400).json({ message: 'User not found or details do not match' });
+    }
+
+    const normalizedAnswer = String(secretAnswer).trim().toLowerCase();
+    const isMatch = await bcrypt.compare(normalizedAnswer, user.secretAnswer);
+    if (!isMatch) {
       return res.status(400).json({ message: 'User not found or details do not match' });
     }
 
@@ -294,6 +320,44 @@ router.get('/profile', verifyToken, async (req, res) => {
   } catch (error) {
     console.error('Profile error:', error);
     res.status(500).json({ message: 'Server error fetching profile' });
+  }
+});
+
+// Update current user profile
+router.put('/profile', verifyToken, validate(profileUpdateSchema), async (req, res) => {
+  try {
+    const userId = req.user?.userId || req.user?.id || req.user?._id;
+    if (!userId) {
+      return res.status(401).json({ message: 'Invalid token payload' });
+    }
+
+    const updates = {};
+    if (req.body.name) updates.name = String(req.body.name).trim();
+    if (req.body.email) updates.email = String(req.body.email).trim();
+    if (req.body.phone) updates.phone = String(req.body.phone).trim();
+
+    if (updates.email) {
+      const existingUser = await User.findOne({ email: updates.email, _id: { $ne: userId } });
+      if (existingUser) {
+        return res.status(400).json({ message: 'Email already in use' });
+      }
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    Object.assign(user, updates);
+    await user.save();
+
+    const sanitizedUser = user.toObject();
+    delete sanitizedUser.password;
+
+    res.json({ message: 'Profile updated successfully', user: sanitizedUser });
+  } catch (error) {
+    console.error('Profile update error:', error);
+    res.status(500).json({ message: 'Server error updating profile' });
   }
 });
 

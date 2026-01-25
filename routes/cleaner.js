@@ -68,6 +68,7 @@ router.get('/building-clients', async (req, res) => {
         for (const client of allClients) {
             const subscription = subscriptionByClient.get(client._id.toString());
             if (!subscription) continue;
+            const planName = subscription?.planDetails?.type || subscription?.planDetails?.planType || null;
 
             const clientCars = carsByClient.get(client._id.toString()) || [];
             let car = null;
@@ -101,6 +102,7 @@ router.get('/building-clients', async (req, res) => {
                 result.push({
                     ...client.toObject(),
                     status: 'washed',
+                    planName,
                     carPhotoUrl,
                     carDetails: car ? {
                         _id: car._id,
@@ -126,6 +128,7 @@ router.get('/building-clients', async (req, res) => {
                 result.push({
                     ...client.toObject(),
                     status: 'scheduled',
+                    planName,
                     carPhotoUrl,
                     carDetails: car ? {
                         _id: car._id,
@@ -155,6 +158,7 @@ router.get('/building-clients', async (req, res) => {
                     result.push({
                         ...client.toObject(),
                         status: 'pending',
+                        planName,
                         carPhotoUrl,
                         carDetails: car ? {
                             _id: car._id,
