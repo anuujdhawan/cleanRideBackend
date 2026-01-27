@@ -15,4 +15,5 @@ const resolveCarPhotoUrl = (req, photo) => {
 
 module.exports = {
     resolveCarPhotoUrl,
+    isAbsolutePhotoValue,
 };

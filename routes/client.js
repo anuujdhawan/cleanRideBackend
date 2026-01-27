@@ -1,4 +1,5 @@
 const express = require('express');
+const fs = require('fs');
 const path = require('path');
 const router = express.Router();
 
@@ -13,7 +14,7 @@ const Contact = require('../models/Contact');
 const Subscription = require('../models/Subscription');
 const WashRecord = require('../models/WashRecord');
 const SubscriptionPlan = require('../models/SubscriptionPlan');
-const { resolveCarPhotoUrl } = require('../utils/carPhotoUrl');
+const { resolveCarPhotoUrl, isAbsolutePhotoValue } = require('../utils/carPhotoUrl');
 
 let stripe = null;
 const stripeKey = process.env.STRIPE_SECRET_KEY;
@@ -101,6 +102,21 @@ const ensurePlanStripePricing = async (plan) => {
 };
 
 const buildCarPhotoUrl = (req, photo) => resolveCarPhotoUrl(req, photo);
+const carPhotoDir = path.join(__dirname, '..', 'public', 'car-photos');
+
+const removeCarPhotoFile = async (photo) => {
+    if (!photo || isAbsolutePhotoValue(photo)) return;
+    const safeName = path.basename(String(photo));
+    if (!safeName) return;
+    const filePath = path.join(carPhotoDir, safeName);
+    try {
+        await fs.promises.unlink(filePath);
+    } catch (error) {
+        if (error?.code !== 'ENOENT') {
+            console.warn('Failed to remove car photo file:', error.message || error);
+        }
+    }
+};
 
 // Middleware to verify token
 const verifyToken = (req, res, next) => {
@@ -557,6 +573,7 @@ router.delete('/cars/:carId', async (req, res) => {
         }
 
         await Car.deleteOne({ _id: car._id });
+        await removeCarPhotoFile(car.photo);
         res.json({ message: 'Car deleted successfully' });
     } catch (error) {
         res.status(500).json({ message: error.message });
