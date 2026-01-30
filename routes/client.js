@@ -15,6 +15,8 @@ const Subscription = require('../models/Subscription');
 const WashRecord = require('../models/WashRecord');
 const SubscriptionPlan = require('../models/SubscriptionPlan');
 const { resolveCarPhotoUrl, isAbsolutePhotoValue } = require('../utils/carPhotoUrl');
+const { sendExpoPushNotifications } = require('../utils/expoPush');
+const { Expo } = require('expo-server-sdk');
 
 let stripe = null;
 const stripeKey = process.env.STRIPE_SECRET_KEY;
@@ -641,11 +643,49 @@ router.post('/feedback', async (req, res) => {
 });
 
 // POST /save-push-token
-router.post('/save-push-token', async (req, res) => {
+router.post('/save-push-token', verifyToken, async (req, res) => {
     try {
         const { userId, token } = req.body;
-        await User.findByIdAndUpdate(userId, { pushToken: token });
+        const resolvedUserId = userId || req.user?.userId;
+        if (!resolvedUserId || !token) {
+            return res.status(400).json({ message: 'userId and token are required' });
+        }
+        if (req.user?.userId && String(req.user.userId) !== String(resolvedUserId)) {
+            return res.status(403).json({ message: 'Unauthorized push token update' });
+        }
+        if (!Expo.isExpoPushToken(token)) {
+            return res.status(400).json({ message: 'Invalid Expo push token' });
+        }
+        await User.findByIdAndUpdate(resolvedUserId, { pushToken: token });
         res.json({ message: 'Push token saved' });
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// POST /test-push - send a test notification to the logged-in client
+router.post('/test-push', verifyToken, async (req, res) => {
+    try {
+        const { title, body } = req.body;
+        const userId = req.user?.userId;
+        if (!userId) {
+            return res.status(400).json({ message: 'User ID required' });
+        }
+        const user = await User.findById(userId);
+        if (!user || !user.pushToken) {
+            return res.status(404).json({ message: 'Push token not found for this user' });
+        }
+
+        const payload = [{
+            to: user.pushToken,
+            sound: 'default',
+            title: title || 'CleanRide Test Notification',
+            body: body || 'This is a test push notification from CleanRide.',
+            data: { type: 'test' }
+        }];
+
+        const result = await sendExpoPushNotifications(payload, { action: 'client-test-push', userId: String(userId) });
+        res.json({ message: 'Test push sent', result });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }

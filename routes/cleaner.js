@@ -7,6 +7,9 @@ const User = require('../models/User');
 const WashRecord = require('../models/WashRecord');
 const { logActivity } = require('../utils/activityLogger');
 const { resolveCarPhotoUrl } = require('../utils/carPhotoUrl');
+const { sendExpoPushNotifications } = require('../utils/expoPush');
+
+const pushDebugEnabled = process.env.ENABLE_PUSH_DEBUG === 'true';
 
 // GET /building-clients
 router.get('/building-clients', async (req, res) => {
@@ -222,21 +225,46 @@ router.post('/record-wash', async (req, res) => {
 
         // Send Push Notification to Client
         if (client && client.pushToken) {
-            const { Expo } = require('expo-server-sdk');
-            const expo = new Expo();
-
-            if (Expo.isExpoPushToken(client.pushToken)) {
-                await expo.sendPushNotificationsAsync([{
-                    to: client.pushToken,
-                    sound: 'default',
-                    title: 'Car Wash Completed',
-                    body: `Your car (${licensePlate}) has been washed!`,
-                    data: { washId: newWash._id },
-                }]);
-            }
+            await sendExpoPushNotifications([{
+                to: client.pushToken,
+                sound: 'default',
+                title: 'Car Wash Completed',
+                body: `Your car (${licensePlate}) has been washed!`,
+                data: { washId: newWash._id },
+            }], { action: 'record-wash', clientId: String(clientId), carId: carId ? String(carId) : null });
         }
 
         res.status(201).json(newWash);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// POST /test-push (debug)
+router.post('/test-push', async (req, res) => {
+    try {
+        if (!pushDebugEnabled) {
+            return res.status(404).json({ message: 'Not found' });
+        }
+        const { clientId, title, body } = req.body;
+        if (!clientId) {
+            return res.status(400).json({ message: 'clientId is required' });
+        }
+        const client = await User.findById(clientId);
+        if (!client || !client.pushToken) {
+            return res.status(404).json({ message: 'Client push token not found' });
+        }
+
+        const payload = [{
+            to: client.pushToken,
+            sound: 'default',
+            title: title || 'CleanRide Test Notification',
+            body: body || 'Test push sent from cleaner debug.',
+            data: { type: 'cleaner-test' }
+        }];
+
+        const result = await sendExpoPushNotifications(payload, { action: 'cleaner-test-push', clientId: String(clientId) });
+        res.json({ message: 'Test push sent', result });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
@@ -306,18 +334,13 @@ router.put('/status/:scheduleId', async (req, res) => {
         if (status === 'completed') {
             const schedule = await Schedule.findById(scheduleId).populate('clientId');
             if (schedule && schedule.clientId && schedule.clientId.pushToken) {
-                const { Expo } = require('expo-server-sdk');
-                const expo = new Expo();
-
-                if (Expo.isExpoPushToken(schedule.clientId.pushToken)) {
-                    await expo.sendPushNotificationsAsync([{
-                        to: schedule.clientId.pushToken,
-                        sound: 'default',
-                        title: 'Car Wash Completed',
-                        body: `Your car wash for ${schedule.scheduledDate.toDateString()} has been completed!`,
-                        data: { scheduleId: schedule._id },
-                    }]);
-                }
+                await sendExpoPushNotifications([{
+                    to: schedule.clientId.pushToken,
+                    sound: 'default',
+                    title: 'Car Wash Completed',
+                    body: `Your car wash for ${schedule.scheduledDate.toDateString()} has been completed!`,
+                    data: { scheduleId: schedule._id },
+                }], { action: 'schedule-completed', scheduleId: String(scheduleId) });
             }
         }
 
