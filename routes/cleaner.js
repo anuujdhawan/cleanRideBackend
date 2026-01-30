@@ -56,108 +56,58 @@ router.get('/building-clients', async (req, res) => {
             userId: { $in: clientIds },
             status: 'active'
         }).sort({ createdAt: -1 }).lean();
-        const subscriptionByClient = new Map();
+        const subscriptionsByClient = new Map();
+        const seenSubscriptionKeys = new Set();
         subscriptions.forEach((sub) => {
-            const key = sub.userId.toString();
-            if (!subscriptionByClient.has(key)) {
-                subscriptionByClient.set(key, sub);
-            }
+            const userKey = sub.userId?.toString?.() || String(sub.userId);
+            const carKey = sub.carId ? sub.carId.toString() : 'no-car';
+            const dedupeKey = `${userKey}:${carKey}`;
+            if (seenSubscriptionKeys.has(dedupeKey)) return;
+            seenSubscriptionKeys.add(dedupeKey);
+            const list = subscriptionsByClient.get(userKey) || [];
+            list.push(sub);
+            subscriptionsByClient.set(userKey, list);
         });
         const result = [];
 
         for (const client of allClients) {
-            const subscription = subscriptionByClient.get(client._id.toString());
-            if (!subscription) continue;
-            const planName = subscription?.planDetails?.type || subscription?.planDetails?.planType || null;
-
             const clientCars = carsByClient.get(client._id.toString()) || [];
-            let car = null;
-            if (subscription.carId) {
-                car = carById.get(subscription.carId.toString());
-            }
-            if (!car && clientCars.length === 1) {
-                car = clientCars[0];
-            }
-            if (!car) continue;
+            const clientSubscriptions = subscriptionsByClient.get(client._id.toString()) || [];
+            if (!clientSubscriptions.length) continue;
 
             const hasSingleCar = clientCars.length === 1;
-            const carQuery = hasSingleCar
-                ? { $or: [{ carId: car._id }, { carId: { $exists: false } }, { carId: null }] }
-                : { carId: car._id };
+            for (const subscription of clientSubscriptions) {
+                const planName = subscription?.planDetails?.type || subscription?.planDetails?.planType || null;
+                let car = null;
+                if (subscription.carId) {
+                    car = carById.get(subscription.carId.toString());
+                }
+                if (!car && hasSingleCar) {
+                    car = clientCars[0];
+                }
+                if (!car) continue;
 
-            // 1. Check if washed TODAY
-            const todayStart = new Date(now);
-            todayStart.setHours(0, 0, 0, 0);
-            const todayEnd = new Date(now);
-            todayEnd.setHours(23, 59, 59, 999);
+                const carQuery = hasSingleCar
+                    ? { $or: [{ carId: car._id }, { carId: { $exists: false } }, { carId: null }] }
+                    : { carId: car._id };
 
-            const washedToday = await WashRecord.findOne({
-                clientId: client._id,
-                ...carQuery,
-                washDate: { $gte: todayStart, $lte: todayEnd }
-            });
+                // 1. Check if washed TODAY
+                const todayStart = new Date(now);
+                todayStart.setHours(0, 0, 0, 0);
+                const todayEnd = new Date(now);
+                todayEnd.setHours(23, 59, 59, 999);
 
-            if (washedToday) {
-                const carPhotoUrl = resolveCarPhotoUrl(req, car?.photo);
-                result.push({
-                    ...client.toObject(),
-                    status: 'washed',
-                    planName,
-                    carPhotoUrl,
-                    carDetails: car ? {
-                        _id: car._id,
-                        make: car.make,
-                        model: car.model,
-                        color: car.color,
-                        licensePlate: car.licensePlate,
-                        parkingSlot: car.parkingSlot,
-                        type: car.type
-                    } : null
-                });
-                continue;
-            }
-
-            // 2. If not washed today, determine if it's scheduled or pending
-            const lastScheduled = getLastScheduledDay(client.washDays, now);
-            if (!lastScheduled) continue;
-
-            const isScheduledToday = lastScheduled.toDateString() === now.toDateString();
-
-            if (isScheduledToday) {
-                const carPhotoUrl = resolveCarPhotoUrl(req, car?.photo);
-                result.push({
-                    ...client.toObject(),
-                    status: 'scheduled',
-                    planName,
-                    carPhotoUrl,
-                    carDetails: car ? {
-                        _id: car._id,
-                        make: car.make,
-                        model: car.model,
-                        color: car.color,
-                        licensePlate: car.licensePlate,
-                        parkingSlot: car.parkingSlot,
-                        type: car.type
-                    } : null
-                });
-            } else {
-                // Check if it was washed on its last scheduled day
-                const schedStart = new Date(lastScheduled);
-                const schedEnd = new Date(lastScheduled);
-                schedEnd.setHours(23, 59, 59, 999);
-
-                const washedOnSchedDay = await WashRecord.findOne({
+                const washedToday = await WashRecord.findOne({
                     clientId: client._id,
                     ...carQuery,
-                    washDate: { $gte: schedStart, $lte: schedEnd }
+                    washDate: { $gte: todayStart, $lte: todayEnd }
                 });
 
-                if (!washedOnSchedDay) {
-                    // Missed the last scheduled day -> Pending
+                if (washedToday) {
                     const carPhotoUrl = resolveCarPhotoUrl(req, car?.photo);
                     result.push({
                         ...client.toObject(),
-                        status: 'pending',
+                        status: 'washed',
                         planName,
                         carPhotoUrl,
                         carDetails: car ? {
@@ -170,6 +120,63 @@ router.get('/building-clients', async (req, res) => {
                             type: car.type
                         } : null
                     });
+                    continue;
+                }
+
+                // 2. If not washed today, determine if it's scheduled or pending
+                const lastScheduled = getLastScheduledDay(client.washDays, now);
+                if (!lastScheduled) continue;
+
+                const isScheduledToday = lastScheduled.toDateString() === now.toDateString();
+
+                if (isScheduledToday) {
+                    const carPhotoUrl = resolveCarPhotoUrl(req, car?.photo);
+                    result.push({
+                        ...client.toObject(),
+                        status: 'scheduled',
+                        planName,
+                        carPhotoUrl,
+                        carDetails: car ? {
+                            _id: car._id,
+                            make: car.make,
+                            model: car.model,
+                            color: car.color,
+                            licensePlate: car.licensePlate,
+                            parkingSlot: car.parkingSlot,
+                            type: car.type
+                        } : null
+                    });
+                } else {
+                    // Check if it was washed on its last scheduled day
+                    const schedStart = new Date(lastScheduled);
+                    const schedEnd = new Date(lastScheduled);
+                    schedEnd.setHours(23, 59, 59, 999);
+
+                    const washedOnSchedDay = await WashRecord.findOne({
+                        clientId: client._id,
+                        ...carQuery,
+                        washDate: { $gte: schedStart, $lte: schedEnd }
+                    });
+
+                    if (!washedOnSchedDay) {
+                        // Missed the last scheduled day -> Pending
+                        const carPhotoUrl = resolveCarPhotoUrl(req, car?.photo);
+                        result.push({
+                            ...client.toObject(),
+                            status: 'pending',
+                            planName,
+                            carPhotoUrl,
+                            carDetails: car ? {
+                                _id: car._id,
+                                make: car.make,
+                                model: car.model,
+                                color: car.color,
+                                licensePlate: car.licensePlate,
+                                parkingSlot: car.parkingSlot,
+                                type: car.type
+                            } : null
+                        });
+                    }
                 }
             }
         }
