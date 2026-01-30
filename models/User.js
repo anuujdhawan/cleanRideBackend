@@ -49,7 +49,7 @@ const userSchema = new mongoose.Schema({
   floorNumber: {
     type: String
   },
-  parkingSlot: {
+  apartmentNumber: {
     type: String
   },
   washDays: {

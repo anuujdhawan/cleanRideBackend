@@ -110,7 +110,7 @@ router.get('/building-clients', async (req, res) => {
                         model: car.model,
                         color: car.color,
                         licensePlate: car.licensePlate,
-                        apartmentNumber: car.apartmentNumber,
+                        parkingSlot: car.parkingSlot,
                         type: car.type
                     } : null
                 });
@@ -136,7 +136,7 @@ router.get('/building-clients', async (req, res) => {
                         model: car.model,
                         color: car.color,
                         licensePlate: car.licensePlate,
-                        apartmentNumber: car.apartmentNumber,
+                        parkingSlot: car.parkingSlot,
                         type: car.type
                     } : null
                 });
@@ -166,7 +166,7 @@ router.get('/building-clients', async (req, res) => {
                             model: car.model,
                             color: car.color,
                             licensePlate: car.licensePlate,
-                            apartmentNumber: car.apartmentNumber,
+                            parkingSlot: car.parkingSlot,
                             type: car.type
                         } : null
                     });

@@ -126,7 +126,7 @@ router.post('/register', maybeUploadCarPhoto, validate(registerSchema), async (r
       adminSecretCode,
       buildingName,
       floorNumber,
-      parkingSlot,
+      apartmentNumber,
       secretQuestion,
       secretAnswer
     } = req.body;
@@ -194,7 +194,7 @@ router.post('/register', maybeUploadCarPhoto, validate(registerSchema), async (r
       buildingAssigned: resolvedRole === 'cleaner' ? buildingAssigned : undefined,
       buildingName: resolvedRole === 'client' ? buildingName : undefined,
       floorNumber: resolvedRole === 'client' ? floorNumber : undefined,
-      parkingSlot: resolvedRole === 'client' ? parkingSlot : undefined,
+      apartmentNumber: resolvedRole === 'client' ? apartmentNumber : undefined,
       washDays: washDays
     });
 
@@ -221,7 +221,7 @@ router.post('/register', maybeUploadCarPhoto, validate(registerSchema), async (r
         buildingAssigned: savedUser.buildingAssigned,
         buildingName: savedUser.buildingName,
         floorNumber: savedUser.floorNumber,
-        parkingSlot: savedUser.parkingSlot
+        apartmentNumber: savedUser.apartmentNumber
       },
       car: createdCar
     });
@@ -267,7 +267,7 @@ router.post('/login', validate(loginSchema), async (req, res) => {
         buildingAssigned: user.buildingAssigned,
         buildingName: user.buildingName,
         floorNumber: user.floorNumber,
-        parkingSlot: user.parkingSlot
+        apartmentNumber: user.apartmentNumber
       }
     });
   } catch (error) {
@@ -364,7 +364,7 @@ router.put('/profile', verifyToken, validate(profileUpdateSchema), async (req, r
 // Create car for user
 router.post('/create-car', verifyToken, maybeUploadCarPhoto, validate(carSchema), async (req, res) => {
   try {
-    const { clientId, make, model, year, type, licensePlate, color, apartmentNumber } = req.body;
+    const { clientId, make, model, year, type, licensePlate, color, parkingSlot } = req.body;
     const authUserId = req.user?.userId || req.user?.id || req.user?._id;
 
     if (!authUserId) {
@@ -394,7 +394,7 @@ router.post('/create-car', verifyToken, maybeUploadCarPhoto, validate(carSchema)
       year: parsedYear,
       type: normalizeCarType(type),
       licensePlate,
-      apartmentNumber,
+      parkingSlot,
       color,
       photo: resolveCarPhotoValue(req.file)
     });

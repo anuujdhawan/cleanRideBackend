@@ -9,14 +9,14 @@ const registerSchema = z.object({
     role: z.enum(['client', 'cleaner', 'admin', 'developer']).optional().default('client'),
     buildingName: z.string().optional(),
     floorNumber: z.string().optional(),
-    parkingSlot: z.string().optional(),
+    apartmentNumber: z.string().optional(),
     secretQuestion: z.string().min(1, 'Secret question is required').optional(),
     secretAnswer: z.string().min(1, 'Secret answer is required').optional(),
     adminSecretCode: z.string().optional(),
     buildingAssigned: z.string().optional(),
 }).refine((data) => {
     if (data.role === 'client') {
-        return !!data.buildingName && !!data.floorNumber && !!data.parkingSlot;
+        return !!data.buildingName && !!data.floorNumber && !!data.apartmentNumber;
     }
     return true;
 }, {
@@ -45,7 +45,7 @@ const carSchema = z.object({
     type: z.string().min(1, 'Type is required'),
     licensePlate: z.string().min(1, 'License plate is required'),
     color: z.string().min(1, 'Color is required'),
-    apartmentNumber: z.string().min(1, 'Apartment number is required'),
+    parkingSlot: z.string().min(1, 'Parking slot is required'),
 });
 
 const profileUpdateSchema = z.object({

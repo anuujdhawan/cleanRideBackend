@@ -14,10 +14,10 @@ const carSchema = new mongoose.Schema({
     type: String,
     required: true
   },
-  year: {
-    type: Number,
-    required: true
-  },
+  // year: {
+  //   type: Number,
+  //   required: true
+  // },
   type: {
     type: String,
     enum: ['hatchback', 'sedan', 'mid-suv', 'large-suv'],
@@ -27,7 +27,7 @@ const carSchema = new mongoose.Schema({
     type: String,
     required: true
   },
-  apartmentNumber: {
+  parkingSlot: {
     type: String,
     required: true
   },

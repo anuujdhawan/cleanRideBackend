@@ -434,7 +434,7 @@ router.get('/customers', async (req, res) => {
                         type: primaryCar.type,
                         licensePlate: primaryCar.licensePlate,
                         color: primaryCar.color,
-                        apartmentNumber: primaryCar.apartmentNumber,
+                        parkingSlot: primaryCar.parkingSlot,
                     }
                     : null,
             };
