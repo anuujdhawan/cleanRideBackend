@@ -14,6 +14,7 @@ const Contact = require('../models/Contact');
 const Subscription = require('../models/Subscription');
 const WashRecord = require('../models/WashRecord');
 const SubscriptionPlan = require('../models/SubscriptionPlan');
+const bcrypt = require('bcrypt');
 const { resolveCarPhotoUrl, isAbsolutePhotoValue } = require('../utils/carPhotoUrl');
 const { sendExpoPushNotifications } = require('../utils/expoPush');
 const { Expo } = require('expo-server-sdk');
@@ -298,16 +299,21 @@ router.get('/monthly-schedule', async (req, res) => {
             holdStartDate = new Date(holdSource.getFullYear(), holdSource.getMonth(), holdSource.getDate());
         }
 
+        const washRecordQuery = {
+            clientId: userId,
+            $or: [
+                { washDate: { $gte: startOfMonth, $lte: endOfMonth } },
+                { washForDate: { $gte: startOfMonth, $lte: endOfMonth } }
+            ]
+        };
+
         const [schedules, washRecords] = await Promise.all([
             Schedule.find({
                 clientId: userId,
                 carId,
                 scheduledDate: { $gte: startOfMonth, $lte: endOfMonth }
             }).lean(),
-            WashRecord.find({
-                clientId: userId,
-                washDate: { $gte: startOfMonth, $lte: endOfMonth }
-            }).lean()
+            WashRecord.find(washRecordQuery).lean()
         ]);
 
         const toLocalDateKey = (value) => {
@@ -326,7 +332,8 @@ router.get('/monthly-schedule', async (req, res) => {
 
         const washByDay = new Map();
         washRecords.forEach((record) => {
-            const key = toLocalDateKey(record.washDate);
+            const keySource = record.washForDate || record.washDate;
+            const key = toLocalDateKey(keySource);
             const entry = washByDay.get(key) || { hasCarMatch: false, washTime: null };
             const recordCarId = record.carId ? record.carId.toString() : null;
             let resolvedCarId = recordCarId;
@@ -686,6 +693,106 @@ router.post('/test-push', verifyToken, async (req, res) => {
 
         const result = await sendExpoPushNotifications(payload, { action: 'client-test-push', userId: String(userId) });
         res.json({ message: 'Test push sent', result });
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const normalizePhone = (value) => String(value || '').replace(/\D/g, '');
+
+const buildDeletionRequestMessage = ({
+    username,
+    email,
+    phone,
+    secretQuestionProvided,
+    verificationStatus,
+    note,
+    source,
+    activeSubscriptions,
+}) => {
+    return [
+        'ACCOUNT DELETION REQUEST',
+        `Submitted at: ${new Date().toISOString()}`,
+        `Source: ${source || 'unknown'}`,
+        `Username: ${username || 'N/A'}`,
+        `Email: ${email || 'N/A'}`,
+        `Phone: ${phone || 'N/A'}`,
+        `Secret question provided: ${secretQuestionProvided ? 'Yes' : 'No'}`,
+        `Verification status: ${verificationStatus || 'unverified'}`,
+        `Active subscriptions: ${typeof activeSubscriptions === 'number' ? activeSubscriptions : 'unknown'}`,
+        `Notes: ${note || 'N/A'}`,
+    ].join('\n');
+};
+
+// POST /account-deletion-request
+router.post('/account-deletion-request', async (req, res) => {
+    try {
+        const { username, email, phone, secretQuestion, secretAnswer, note, source } = req.body;
+
+        const normalizedUsername = (username || '').trim();
+        const normalizedEmail = (email || '').trim().toLowerCase();
+        const normalizedPhone = normalizePhone(phone);
+        const normalizedQuestion = (secretQuestion || '').trim();
+        const normalizedAnswer = (secretAnswer || '').trim().toLowerCase();
+
+        if (!normalizedUsername && !normalizedEmail && !normalizedPhone) {
+            return res.status(400).json({ message: 'Username, email, or phone is required.' });
+        }
+        if (!normalizedQuestion || !normalizedAnswer) {
+            return res.status(400).json({ message: 'Secret question and answer are required.' });
+        }
+
+        let user = null;
+        if (normalizedEmail) {
+            user = await User.findOne({ email: new RegExp(`^${escapeRegex(normalizedEmail)}$`, 'i') });
+        }
+        if (!user && normalizedUsername) {
+            user = await User.findOne({ username: new RegExp(`^${escapeRegex(normalizedUsername)}$`, 'i') });
+        }
+        if (!user && normalizedPhone) {
+            user = await User.findOne({ phone: normalizedPhone });
+        }
+
+        if (!user) {
+            return res.status(404).json({ message: 'User not found.' });
+        }
+        if (user.role !== 'client') {
+            return res.status(403).json({ message: 'Only client accounts can request deletion.' });
+        }
+
+        const questionMatches = user.secretQuestion
+            ? String(user.secretQuestion).trim() === normalizedQuestion
+            : false;
+        const answerMatches = questionMatches && user.secretAnswer
+            ? await bcrypt.compare(normalizedAnswer, user.secretAnswer)
+            : false;
+        const verificationStatus = questionMatches && answerMatches ? 'verified' : 'unverified';
+
+        const activeSubscriptions = await Subscription.countDocuments({
+            userId: user._id,
+            status: { $in: ['active', 'on_hold'] }
+        });
+
+        const contact = new Contact({
+            userId: user._id,
+            subject: 'ACCOUNT DELETION REQUEST',
+            message: buildDeletionRequestMessage({
+                username: normalizedUsername || user.username,
+                email: normalizedEmail || user.email,
+                phone: normalizedPhone || user.phone,
+                secretQuestionProvided: Boolean(normalizedQuestion),
+                verificationStatus,
+                note: (note || '').trim(),
+                source: source || 'app',
+                activeSubscriptions,
+            }),
+        });
+
+        await contact.save();
+
+        res.status(201).json({ message: 'Deletion request submitted.' });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }

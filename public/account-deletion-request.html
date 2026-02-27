@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CleanRide Account Deletion Request</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        color: #0f172a;
+        background: #f8fafc;
+        margin: 0;
+        padding: 24px;
+      }
+      .card {
+        max-width: 720px;
+        margin: 0 auto;
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        padding: 24px;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+      }
+      h1 {
+        margin-top: 0;
+        font-size: 24px;
+      }
+      p {
+        line-height: 1.5;
+      }
+      label {
+        display: block;
+        font-weight: 700;
+        margin: 14px 0 6px;
+      }
+      input,
+      select,
+      textarea {
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid #cbd5f5;
+        border-radius: 8px;
+        font-size: 14px;
+        box-sizing: border-box;
+      }
+      textarea {
+        min-height: 120px;
+        resize: vertical;
+      }
+      .actions {
+        margin-top: 16px;
+      }
+      button {
+        background: #06b6d4;
+        color: #0f172a;
+        border: none;
+        padding: 12px 18px;
+        border-radius: 999px;
+        font-weight: 700;
+        font-size: 14px;
+        cursor: pointer;
+      }
+      .note {
+        margin-top: 16px;
+        font-size: 13px;
+        color: #475569;
+      }
+      .status {
+        margin-top: 12px;
+        font-weight: 700;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>CleanRide Account Deletion Request</h1>
+      <p>
+        Submit this form to request deletion of your CleanRide account and associated data. We may contact you to verify your request.
+      </p>
+      <form id="deletion-form">
+        <label for="username">Username</label>
+        <input id="username" name="username" type="text" placeholder="Your username" />
+
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" placeholder="you@example.com" />
+
+        <label for="phone">Phone</label>
+        <input id="phone" name="phone" type="tel" placeholder="Phone number" />
+
+        <label for="secret-question">Secret Question</label>
+        <select id="secret-question" name="secretQuestion" required>
+          <option value="">Select a question</option>
+          <option value="What was the name of your first pet?">What was the name of your first pet?</option>
+          <option value="What is your mother's maiden name?">What is your mother's maiden name?</option>
+          <option value="What was the name of your first school?">What was the name of your first school?</option>
+          <option value="What city were you born in?">What city were you born in?</option>
+          <option value="What is the name of your favorite teacher?">What is the name of your favorite teacher?</option>
+          <option value="What was the make of your first car?">What was the make of your first car?</option>
+        </select>
+
+        <label for="secret-answer">Secret Answer</label>
+        <input id="secret-answer" name="secretAnswer" type="password" placeholder="Your secret answer" required />
+
+        <label for="note">Additional Notes (optional)</label>
+        <textarea id="note" name="note" placeholder="Any extra details"></textarea>
+
+        <div class="actions">
+          <button type="submit">Submit Request</button>
+        </div>
+        <div id="status" class="status"></div>
+      </form>
+      <p class="note">
+        We will delete your account and associated data after verification. Certain records may be retained for legal or compliance purposes.
+      </p>
+    </div>
+
+    <script>
+      const form = document.getElementById('deletion-form');
+      const statusEl = document.getElementById('status');
+      const API_URL = 'https://app.cleanride.ae/api/client/account-deletion-request';
+
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        statusEl.textContent = '';
+
+        const data = {
+          username: form.username.value.trim(),
+          email: form.email.value.trim(),
+          phone: form.phone.value.trim(),
+          secretQuestion: form.secretQuestion.value.trim(),
+          secretAnswer: form.secretAnswer.value.trim(),
+          note: form.note.value.trim(),
+          source: 'web'
+        };
+
+        if (!data.username && !data.email && !data.phone) {
+          statusEl.textContent = 'Please provide your username, email, or phone.';
+          return;
+        }
+
+        try {
+          const response = await fetch(API_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+          });
+
+          const result = await response.json();
+          if (!response.ok) {
+            throw new Error(result.message || 'Request failed.');
+          }
+
+          statusEl.textContent = 'Request submitted successfully.';
+          form.reset();
+        } catch (error) {
+          statusEl.textContent = error.message || 'Request failed.';
+        }
+      });
+    </script>
+  </body>
+</html>

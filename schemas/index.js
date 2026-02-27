@@ -1,11 +1,11 @@
 const z = require('zod');
 
-const registerSchema = z.object({
+const registerBaseSchema = z.object({
     name: z.string().min(1, 'Name is required'),
     username: z.string().min(3, 'Username must be at least 3 characters'),
     email: z.string().email('Invalid email address'),
     password: z.string().min(6, 'Password must be at least 6 characters'),
-    phone: z.string().min(10, 'Phone number must be at least 10 digits'),
+    phone: z.string().min(9, 'Phone number must be at least 9 digits'),
     role: z.enum(['client', 'cleaner', 'admin', 'developer']).optional().default('client'),
     buildingName: z.string().optional(),
     floorNumber: z.string().optional(),
@@ -14,7 +14,10 @@ const registerSchema = z.object({
     secretAnswer: z.string().min(1, 'Secret answer is required').optional(),
     adminSecretCode: z.string().optional(),
     buildingAssigned: z.string().optional(),
-}).refine((data) => {
+    buildingId: z.string().optional(),
+});
+
+const registerSchema = registerBaseSchema.refine((data) => {
     if (data.role === 'client') {
         return !!data.buildingName && !!data.floorNumber && !!data.apartmentNumber;
     }
@@ -51,7 +54,7 @@ const carSchema = z.object({
 const profileUpdateSchema = z.object({
     name: z.string().min(1, 'Name is required').optional(),
     email: z.string().email('Invalid email address').optional(),
-    phone: z.string().regex(/^\d{10,}$/, 'Phone number must be at least 10 digits and contain only numbers').optional(),
+    phone: z.string().regex(/^\d{9,}$/, 'Phone number must be at least 9 digits and contain only numbers').optional(),
 }).refine((data) => Object.keys(data).length > 0, {
     message: "At least one profile field is required",
     path: ["name"]
@@ -59,6 +62,7 @@ const profileUpdateSchema = z.object({
 
 module.exports = {
     registerSchema,
+    registerBaseSchema,
     loginSchema,
     carSchema,
     profileUpdateSchema,

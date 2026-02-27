@@ -26,23 +26,33 @@ app.use('/public', express.static(path.join(__dirname, 'public')));
 //   })
 //   .catch((err) => console.error('MongoDB connection error:', err));
 
-//serverless mongodb connection
+// Shared MongoDB connection helper (works for serverless + long-lived servers)
 let isConnected = false;
+let hasSeeded = false;
 const connectToDatabase = async () => {
-  if (!isConnected) {
-    try {
-      await mongoose.connect(process.env.MONGODB_URI || process.env.MONGO_URL || 'mongodb://localhost:27017/carCleanerDB');
-      console.log('Connected to MongoDB');
+  if (isConnected) return true;
+  try {
+    await mongoose.connect(process.env.MONGODB_URI || process.env.MONGO_URL || 'mongodb://localhost:27017/carCleanerDB');
+    console.log('Connected to MongoDB');
+    isConnected = true;
+    if (!hasSeeded) {
       await seedCarBrands();
-      isConnected = true;
-    } catch (error) {
-      console.error('MongoDB connection error:', error);
+      hasSeeded = true;
     }
+    return true;
+  } catch (error) {
+    console.error('MongoDB connection error:', error);
+    return false;
   }
 };
+
+// Serverless path: connect lazily per request and fail fast if unavailable
 app.use(async (req, res, next) => {
   if (!isConnected) {
-    await connectToDatabase();
+    const ok = await connectToDatabase();
+    if (!ok) {
+      return res.status(503).json({ message: 'Database connection unavailable' });
+    }
   }
   next();
 });
@@ -57,11 +67,22 @@ app.use('/api/buildings', require('./routes/buildings'));
 app.use('/api/brands', require('./routes/brands'));
 app.use('/api/payment', require('./routes/payment'));
 
-// const port = process.env.PORT || 5000;
-// app.listen(port, () => {
-//   console.log(`===============>>>Backend Server is running on port ${port}`);
-// });
+const startServer = async () => {
+  const ok = await connectToDatabase();
+  if (!ok) {
+    console.error('Failed to connect to MongoDB. Server will not start.');
+    process.exit(1);
+  }
+  const port = process.env.PORT || 5000;
+  app.listen(port, () => {
+    console.log(`===============>>>Backend Server is running on port ${port}`);
+  });
+};
 
+// Run server normally when executed directly (e.g. Node on a VPS)
+if (require.main === module) {
+  void startServer();
+}
 
-// Export the app for serverless deployment on vercel or other platforms
+// Export the app for serverless deployment (e.g. Vercel)
 module.exports = app;

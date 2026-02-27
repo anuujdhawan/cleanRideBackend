@@ -20,10 +20,12 @@ const userSchema = new mongoose.Schema({
     required: true
   },
   secretQuestion: {
-    type: String
+    type: String,
+    required: false
   },
   secretAnswer: {
-    type: String
+    type: String,
+    required: false
   },
   phone: {
     type: String,

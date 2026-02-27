@@ -13,6 +13,8 @@ const Building = require('../models/Building');
 const { logActivity } = require('../utils/activityLogger');
 const { resolveCarPhotoUrl } = require('../utils/carPhotoUrl');
 const bcrypt = require('bcrypt');
+const validate = require('../middleware/validate');
+const { registerSchema, registerBaseSchema } = require('../schemas');
 
 const { Types } = require('mongoose');
 
@@ -235,7 +237,7 @@ router.get('/cleaners', async (req, res) => {
 });
 
 // POST /cleaners
-router.post('/cleaners', async (req, res) => {
+router.post('/cleaners', validate(registerSchema), async (req, res) => {
     try {
         const { name, username, email, password, phone, buildingAssigned } = req.body;
 
@@ -268,7 +270,7 @@ router.post('/cleaners', async (req, res) => {
 
 
 // PUT /cleaners/:id
-router.put('/cleaners/:id', async (req, res) => {
+router.put('/cleaners/:id', validate(registerBaseSchema.partial()), async (req, res) => {
     try {
         const { name, username, email, phone, buildingAssigned, password } = req.body;
         const updates = { name, username, email, phone, buildingAssigned };
@@ -302,17 +304,29 @@ router.put('/cleaners/:id', async (req, res) => {
 // GET /developers
 router.get('/developers', async (req, res) => {
     try {
-        const developers = await User.find({ role: 'developer' });
-        res.json(developers);
+        const developers = await User.find({ role: 'developer' }).lean();
+        const developerIds = developers.map(d => d._id);
+        const buildings = await Building.find({ developerId: { $in: developerIds } }).lean();
+
+        const developersWithBuildings = developers.map(dev => {
+            const assignedBuilding = buildings.find(b => b.developerId?.toString() === dev._id.toString());
+            return {
+                ...dev,
+                assignedBuilding: assignedBuilding ? assignedBuilding.name : null,
+                buildingId: assignedBuilding ? assignedBuilding._id : null
+            };
+        });
+
+        res.json(developersWithBuildings);
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
 });
 
 // POST /developers
-router.post('/developers', async (req, res) => {
+router.post('/developers', validate(registerSchema), async (req, res) => {
     try {
-        const { name, username, email, password, phone } = req.body;
+        const { name, username, email, password, phone, buildingId } = req.body;
 
         const saltRounds = 10;
         const hashedPassword = await bcrypt.hash(password, saltRounds);
@@ -327,6 +341,13 @@ router.post('/developers', async (req, res) => {
         });
         await newDeveloper.save();
 
+        if (buildingId) {
+            // Unset previous developer for this building if any
+            await Building.updateMany({ developerId: newDeveloper._id }, { $unset: { developerId: "" } });
+            // Set new developer for this building
+            await Building.findByIdAndUpdate(buildingId, { developerId: newDeveloper._id });
+        }
+
         await logActivity('developer_added', `New Developer Added: ${name}`, {
             userId: newDeveloper._id
         });
@@ -338,9 +359,9 @@ router.post('/developers', async (req, res) => {
 });
 
 // PUT /developers/:id
-router.put('/developers/:id', async (req, res) => {
+router.put('/developers/:id', validate(registerBaseSchema.partial()), async (req, res) => {
     try {
-        const { name, username, email, phone, password } = req.body;
+        const { name, username, email, phone, password, buildingId } = req.body;
         const updates = { name, username, email, phone };
 
         if (password && password.trim()) {
@@ -355,6 +376,15 @@ router.put('/developers/:id', async (req, res) => {
         );
         if (!developer) {
             return res.status(404).json({ message: 'Developer not found' });
+        }
+
+        if (buildingId !== undefined) {
+            // Unset this developer from any other buildings
+            await Building.updateMany({ developerId: developer._id }, { $unset: { developerId: "" } });
+            if (buildingId) {
+                // Assign to new building
+                await Building.findByIdAndUpdate(buildingId, { developerId: developer._id });
+            }
         }
 
         await logActivity('developer_updated', `Developer Updated: ${developer.name}`, {
@@ -372,6 +402,9 @@ router.delete('/developers/:id', async (req, res) => {
     try {
         const developer = await User.findByIdAndDelete(req.params.id);
         if (!developer) return res.status(404).json({ message: 'Developer not found' });
+
+        // Unset developerId in Building model
+        await Building.updateMany({ developerId: developer._id }, { $unset: { developerId: "" } });
 
         await logActivity('developer_deleted', `Developer Removed: ${developer.name}`, {
             userId: developer._id
@@ -757,7 +790,7 @@ router.get('/reviews', async (req, res) => {
             .populate('clientId', 'name email phone')
             .sort({ createdAt: -1 })
             .lean();
-        
+
         res.json(reviews);
     } catch (error) {
         res.status(500).json({ message: error.message });
@@ -771,7 +804,7 @@ router.get('/contacts', async (req, res) => {
             .populate('userId', 'name email phone')
             .sort({ createdAt: -1 })
             .lean();
-        
+
         res.json(contacts);
     } catch (error) {
         res.status(500).json({ message: error.message });
@@ -782,7 +815,7 @@ router.get('/contacts', async (req, res) => {
 router.get('/building-car-types/:buildingId', async (req, res) => {
     try {
         const { buildingId } = req.params;
-        
+
         // Find all users associated with the building
         let users;
         if (buildingId === 'all') {
@@ -794,10 +827,10 @@ router.get('/building-car-types/:buildingId', async (req, res) => {
             }
             users = await User.find({ buildingName: building.name, role: 'client' });
         }
-        
+
         // Get all car IDs for these users
         const userIds = users.map(user => user._id);
-        
+
         // Count cars by type
         const hatchbacks = await Car.countDocuments({
             clientId: { $in: userIds },
@@ -818,7 +851,7 @@ router.get('/building-car-types/:buildingId', async (req, res) => {
             clientId: { $in: userIds },
             type: { $in: ['large-suv', 'SUV-large'] }
         });
-        
+
         res.json({
             hatchback: hatchbacks,
             sedan: sedans,

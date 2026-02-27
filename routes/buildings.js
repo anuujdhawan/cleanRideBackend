@@ -22,18 +22,17 @@ router.post('/', async (req, res) => {
         if (!name) {
             return res.status(400).json({ message: 'Building name is required' });
         }
-        if (!developerId) {
-            return res.status(400).json({ message: 'Developer selection is required' });
-        }
         const existingBuilding = await Building.findOne({ name });
         if (existingBuilding) {
             return res.status(400).json({ message: 'Building already exists' });
         }
-        const developer = await User.findOne({ _id: developerId, role: 'developer' });
-        if (!developer) {
-            return res.status(400).json({ message: 'Invalid developer selection' });
+        if (developerId) {
+            const developer = await User.findOne({ _id: developerId, role: 'developer' });
+            if (!developer) {
+                return res.status(400).json({ message: 'Invalid developer selection' });
+            }
         }
-        const newBuilding = new Building({ name, developerId });
+        const newBuilding = new Building({ name, developerId: developerId || undefined });
         await newBuilding.save();
         res.status(201).json(newBuilding);
     } catch (error) {

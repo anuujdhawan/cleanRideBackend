@@ -11,6 +11,32 @@ const { sendExpoPushNotifications } = require('../utils/expoPush');
 
 const pushDebugEnabled = process.env.ENABLE_PUSH_DEBUG === 'true';
 
+const toLocalDateKey = (value) => {
+    const date = new Date(value);
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+};
+
+const parseLocalDateKey = (value) => {
+    if (typeof value !== 'string') return null;
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+    if (!match) return null;
+    const year = Number(match[1]);
+    const monthIndex = Number(match[2]) - 1;
+    const day = Number(match[3]);
+    const parsed = new Date(year, monthIndex, day, 0, 0, 0, 0);
+    if (
+        parsed.getFullYear() !== year ||
+        parsed.getMonth() !== monthIndex ||
+        parsed.getDate() !== day
+    ) {
+        return null;
+    }
+    return parsed;
+};
+
 // GET /building-clients
 router.get('/building-clients', async (req, res) => {
     try {
@@ -111,6 +137,7 @@ router.get('/building-clients', async (req, res) => {
                     result.push({
                         ...client.toObject(),
                         status: 'washed',
+                        pendingForDate: null,
                         planName,
                         carPhotoUrl,
                         carDetails: car ? {
@@ -137,6 +164,7 @@ router.get('/building-clients', async (req, res) => {
                     result.push({
                         ...client.toObject(),
                         status: 'scheduled',
+                        pendingForDate: null,
                         planName,
                         carPhotoUrl,
                         carDetails: car ? {
@@ -157,8 +185,15 @@ router.get('/building-clients', async (req, res) => {
 
                     const washedOnSchedDay = await WashRecord.findOne({
                         clientId: client._id,
-                        ...carQuery,
-                        washDate: { $gte: schedStart, $lte: schedEnd }
+                        $and: [
+                            carQuery,
+                            {
+                                $or: [
+                                    { washDate: { $gte: schedStart, $lte: schedEnd } },
+                                    { washForDate: { $gte: schedStart, $lte: schedEnd } }
+                                ]
+                            }
+                        ]
                     });
 
                     if (!washedOnSchedDay) {
@@ -167,6 +202,7 @@ router.get('/building-clients', async (req, res) => {
                         result.push({
                             ...client.toObject(),
                             status: 'pending',
+                            pendingForDate: toLocalDateKey(lastScheduled),
                             planName,
                             carPhotoUrl,
                             carDetails: car ? {
@@ -193,9 +229,16 @@ router.get('/building-clients', async (req, res) => {
 // POST /record-wash
 router.post('/record-wash', async (req, res) => {
     try {
-        const { clientId, cleanerId, carId } = req.body;
+        const { clientId, cleanerId, carId, washForDate } = req.body;
         if (!clientId || !cleanerId) {
             return res.status(400).json({ message: 'Missing required fields' });
+        }
+        let resolvedWashForDate = null;
+        if (washForDate !== undefined && washForDate !== null && String(washForDate).trim()) {
+            resolvedWashForDate = parseLocalDateKey(String(washForDate));
+            if (!resolvedWashForDate) {
+                return res.status(400).json({ message: 'washForDate must be in YYYY-MM-DD format' });
+            }
         }
 
         const now = new Date();
@@ -207,6 +250,7 @@ router.post('/record-wash', async (req, res) => {
             cleanerId,
             carId,
             washDate,
+            washForDate: resolvedWashForDate || undefined,
             washTime
         });
         await newWash.save();

@@ -19,6 +19,10 @@ const washRecordSchema = new mongoose.Schema({
         type: Date,
         required: true
     },
+    // Scheduled day this wash is applied to when completing a previously pending wash.
+    washForDate: {
+        type: Date
+    },
     washTime: {
         type: String,
         required: true
