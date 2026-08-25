@@ -14,7 +14,8 @@ const registerBaseSchema = z.object({
     secretAnswer: z.string().min(1, 'Secret answer is required').optional(),
     adminSecretCode: z.string().optional(),
     buildingAssigned: z.string().optional(),
-    buildingId: z.string().optional(),
+    buildingId: z.string().nullable().optional(),
+    buildingIds: z.array(z.string()).nullable().optional(),
 });
 
 const registerSchema = registerBaseSchema.refine((data) => {

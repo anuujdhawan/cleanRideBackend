@@ -9,9 +9,11 @@ const SubscriptionPlan = require('../models/SubscriptionPlan');
 const ActivityLog = require('../models/ActivityLog');
 const Review = require('../models/Review');
 const Contact = require('../models/Contact');
+const WashRecord = require('../models/WashRecord');
 const Building = require('../models/Building');
 const { logActivity } = require('../utils/activityLogger');
 const { resolveCarPhotoUrl } = require('../utils/carPhotoUrl');
+const { summarizeSubscriptionsRevenueInRange } = require('../utils/subscriptionRevenue');
 const bcrypt = require('bcrypt');
 const validate = require('../middleware/validate');
 const { registerSchema, registerBaseSchema } = require('../schemas');
@@ -31,9 +33,108 @@ if (stripeKey && stripeKey.startsWith('sk_')) {
     console.warn('Stripe key is missing or invalid. Admin subscription updates will skip Stripe calls.');
 }
 
+const STRIPE_CALL_TIMEOUT_MS = 15000;
+const ADMIN_ALLOWED_SUBSCRIPTION_STATUSES = new Set(['active', 'on_hold', 'cancelled']);
+
+const normalizeAdminSubscriptionStatus = (status) => {
+    const raw = String(status || '').trim().toLowerCase();
+    if (!raw) return null;
+
+    const normalized = raw.replace(/[\s-]+/g, '_');
+    if (normalized === 'onhold') return 'on_hold';
+    if (normalized === 'canceled') return 'cancelled';
+
+    return ADMIN_ALLOWED_SUBSCRIPTION_STATUSES.has(normalized) ? normalized : null;
+};
+
+const resolveLocalStatusFromStripe = (stripeSubscription) => {
+    const stripeStatus = String(stripeSubscription?.status || '').toLowerCase();
+    if (stripeStatus === 'canceled' || stripeStatus === 'cancelled') {
+        return 'cancelled';
+    }
+    if (stripeStatus === 'active' || stripeStatus === 'trialing') {
+        return stripeSubscription?.pause_collection ? 'on_hold' : 'active';
+    }
+    return 'inactive';
+};
+
+const withStripeTimeout = async (promise, fallbackMessage) => {
+    let timeoutId = null;
+    try {
+        return await Promise.race([
+            promise,
+            new Promise((_, reject) => {
+                timeoutId = setTimeout(() => {
+                    reject(new Error(fallbackMessage));
+                }, STRIPE_CALL_TIMEOUT_MS);
+            })
+        ]);
+    } finally {
+        if (timeoutId) clearTimeout(timeoutId);
+    }
+};
+
 const toStripeUnitAmount = (amount) => {
     const parsed = typeof amount === 'number' ? amount : Number(amount);
     return Math.round((Number.isFinite(parsed) ? parsed : 0) * 100);
+};
+
+const hasDeveloperBuildingAssignment = (body) => (
+    Object.prototype.hasOwnProperty.call(body, 'buildingIds')
+    || Object.prototype.hasOwnProperty.call(body, 'buildingId')
+);
+
+const normalizeDeveloperBuildingIds = (body) => {
+    const rawIds = Array.isArray(body.buildingIds)
+        ? body.buildingIds
+        : (body.buildingId ? [body.buildingId] : []);
+
+    return [...new Set(rawIds.filter(Boolean).map((id) => id.toString()))];
+};
+
+const getBuildingIdsValidationError = async (buildingIds, allowedDeveloperId = null) => {
+    const invalidIds = buildingIds.filter((id) => !Types.ObjectId.isValid(id));
+    if (invalidIds.length) {
+        return 'Invalid building selection';
+    }
+
+    if (!buildingIds.length) {
+        return null;
+    }
+
+    const buildings = await Building.find({ _id: { $in: buildingIds } })
+        .select('name developerId')
+        .lean();
+
+    if (buildings.length !== buildingIds.length) {
+        return 'One or more selected buildings do not exist';
+    }
+
+    const allowedDeveloperIdString = allowedDeveloperId ? allowedDeveloperId.toString() : null;
+    const conflictingBuilding = buildings.find((building) => (
+        building.developerId
+        && (!allowedDeveloperIdString || building.developerId.toString() !== allowedDeveloperIdString)
+    ));
+
+    if (conflictingBuilding) {
+        return `${conflictingBuilding.name} is already assigned to another developer`;
+    }
+
+    return null;
+};
+
+const assignBuildingsToDeveloper = async (developerId, buildingIds) => {
+    await Building.updateMany(
+        { developerId, _id: { $nin: buildingIds } },
+        { $unset: { developerId: "" } }
+    );
+
+    if (buildingIds.length) {
+        await Building.updateMany(
+            { _id: { $in: buildingIds } },
+            { $set: { developerId } }
+        );
+    }
 };
 
 const ensurePlanStripePricing = async (plan) => {
@@ -106,6 +207,70 @@ const ensurePlanStripePricing = async (plan) => {
     return plan;
 };
 
+const sanitizeCustomerRecord = (customer) => {
+    if (!customer) return customer;
+    const sanitized = customer.toObject ? customer.toObject() : { ...customer };
+    delete sanitized.password;
+    delete sanitized.secretAnswer;
+    delete sanitized.secretQuestion;
+    return sanitized;
+};
+
+const getLatestSubscriptionsByCar = (subscriptions = []) => {
+    const latestByCar = new Map();
+    subscriptions.forEach((subscription) => {
+        const carId = subscription?.carId?.toString?.();
+        if (!carId || latestByCar.has(carId)) return;
+        latestByCar.set(carId, subscription);
+    });
+    return latestByCar;
+};
+
+const getCustomerDeleteState = (cars = [], subscriptions = []) => {
+    const hasBlockingSubscription = (subscription) => {
+        const status = String(subscription?.status || '').toLowerCase();
+        return status === 'active' || status === 'on_hold';
+    };
+
+    if (!cars.length) {
+        const openSubscriptions = subscriptions.filter(hasBlockingSubscription);
+
+        if (openSubscriptions.length) {
+            return {
+                canDeleteAccount: false,
+                deleteBlockedReason: 'Customer has active subscription records.'
+            };
+        }
+
+        return { canDeleteAccount: true, deleteBlockedReason: null };
+    }
+
+    const latestByCar = getLatestSubscriptionsByCar(subscriptions);
+    const blockedCars = cars.filter((car) => {
+        const latestSubscription = latestByCar.get(car._id.toString());
+        if (!latestSubscription) return false;
+        return hasBlockingSubscription(latestSubscription);
+    });
+
+    const carIdSet = new Set(cars.map((car) => car._id.toString()));
+    const orphanOpenSubscriptions = subscriptions.filter((subscription) => {
+        const carId = subscription?.carId?.toString?.();
+        if (carId && carIdSet.has(carId)) return false;
+        return hasBlockingSubscription(subscription);
+    });
+
+    if (!blockedCars.length && !orphanOpenSubscriptions.length) {
+        return { canDeleteAccount: true, deleteBlockedReason: null };
+    }
+
+    return {
+        canDeleteAccount: false,
+        deleteBlockedReason: blockedCars.length
+            ? 'All existing car subscriptions must be inactive or cancelled before deleting this user.'
+            : 'Customer has active subscription records.'
+    };
+};
+
 // GET /dashboard
 router.get('/dashboard', async (req, res) => {
     try {
@@ -164,33 +329,41 @@ router.get('/dashboard', async (req, res) => {
             .sort({ createdAt: -1 })
             .limit(5);
 
-        // Calculate Real Revenue Data
+        // Calculate monthly subscription revenue from billing cycles so renewals are included.
         const now = new Date();
         const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
         const pastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-        const pastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0);
-
-        // Current Month Revenue (Sum of prices of subscriptions created this month)
-        const currentMonthSubs = await Subscription.find({
-            createdAt: { $gte: currentMonthStart },
+        const pastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999);
+        const revenueSubscriptions = await Subscription.find({
             ...(clientIds ? { userId: { $in: clientIds } } : {})
-        });
-        const currentMonthRevenue = currentMonthSubs.reduce((sum, sub) => sum + (sub.planDetails?.price || 0), 0);
+        }).lean();
 
-        // Past Month Revenue (Sum of prices of subscriptions created last month)
-        const pastMonthSubs = await Subscription.find({
-            createdAt: { $gte: pastMonthStart, $lte: pastMonthEnd },
-            ...(clientIds ? { userId: { $in: clientIds } } : {})
-        });
-        const pastMonthRevenue = pastMonthSubs.reduce((sum, sub) => sum + (sub.planDetails?.price || 0), 0);
+        const currentMonthRevenueSummary = summarizeSubscriptionsRevenueInRange(
+            revenueSubscriptions,
+            currentMonthStart,
+            now
+        );
+        const pastMonthRevenueSummary = summarizeSubscriptionsRevenueInRange(
+            revenueSubscriptions,
+            pastMonthStart,
+            pastMonthEnd
+        );
 
         const revenueData = {
-            currentMonth: currentMonthRevenue,
-            pastMonth: pastMonthRevenue,
+            currentMonth: currentMonthRevenueSummary.total,
+            pastMonth: pastMonthRevenueSummary.total,
+            currentMonthBreakdown: {
+                new: currentMonthRevenueSummary.newRevenue,
+                renewals: currentMonthRevenueSummary.renewalRevenue
+            },
+            pastMonthBreakdown: {
+                new: pastMonthRevenueSummary.newRevenue,
+                renewals: pastMonthRevenueSummary.renewalRevenue
+            },
             labels: ["Current Month", "Past Month"],
             datasets: [
                 {
-                    data: [currentMonthRevenue, pastMonthRevenue]
+                    data: [currentMonthRevenueSummary.total, pastMonthRevenueSummary.total]
                 }
             ]
         };
@@ -306,14 +479,32 @@ router.get('/developers', async (req, res) => {
     try {
         const developers = await User.find({ role: 'developer' }).lean();
         const developerIds = developers.map(d => d._id);
-        const buildings = await Building.find({ developerId: { $in: developerIds } }).lean();
+        const buildings = await Building.find({ developerId: { $in: developerIds } }).sort({ name: 1 }).lean();
+        const buildingsByDeveloper = new Map();
+
+        buildings.forEach((building) => {
+            const developerId = building.developerId?.toString();
+            if (!developerId) {
+                return;
+            }
+
+            const developerBuildings = buildingsByDeveloper.get(developerId) || [];
+            developerBuildings.push({
+                _id: building._id,
+                name: building.name
+            });
+            buildingsByDeveloper.set(developerId, developerBuildings);
+        });
 
         const developersWithBuildings = developers.map(dev => {
-            const assignedBuilding = buildings.find(b => b.developerId?.toString() === dev._id.toString());
+            const assignedBuildings = buildingsByDeveloper.get(dev._id.toString()) || [];
+            const assignedBuildingNames = assignedBuildings.map((building) => building.name);
             return {
                 ...dev,
-                assignedBuilding: assignedBuilding ? assignedBuilding.name : null,
-                buildingId: assignedBuilding ? assignedBuilding._id : null
+                assignedBuildings,
+                buildingIds: assignedBuildings.map((building) => building._id),
+                assignedBuilding: assignedBuildingNames.length ? assignedBuildingNames.join(', ') : null,
+                buildingId: assignedBuildings[0]?._id || null
             };
         });
 
@@ -326,7 +517,13 @@ router.get('/developers', async (req, res) => {
 // POST /developers
 router.post('/developers', validate(registerSchema), async (req, res) => {
     try {
-        const { name, username, email, password, phone, buildingId } = req.body;
+        const { name, username, email, password, phone } = req.body;
+        const buildingIds = normalizeDeveloperBuildingIds(req.body);
+        const buildingIdsError = await getBuildingIdsValidationError(buildingIds);
+
+        if (buildingIdsError) {
+            return res.status(400).json({ message: buildingIdsError });
+        }
 
         const saltRounds = 10;
         const hashedPassword = await bcrypt.hash(password, saltRounds);
@@ -341,11 +538,8 @@ router.post('/developers', validate(registerSchema), async (req, res) => {
         });
         await newDeveloper.save();
 
-        if (buildingId) {
-            // Unset previous developer for this building if any
-            await Building.updateMany({ developerId: newDeveloper._id }, { $unset: { developerId: "" } });
-            // Set new developer for this building
-            await Building.findByIdAndUpdate(buildingId, { developerId: newDeveloper._id });
+        if (buildingIds.length) {
+            await assignBuildingsToDeveloper(newDeveloper._id, buildingIds);
         }
 
         await logActivity('developer_added', `New Developer Added: ${name}`, {
@@ -361,7 +555,9 @@ router.post('/developers', validate(registerSchema), async (req, res) => {
 // PUT /developers/:id
 router.put('/developers/:id', validate(registerBaseSchema.partial()), async (req, res) => {
     try {
-        const { name, username, email, phone, password, buildingId } = req.body;
+        const { name, username, email, phone, password } = req.body;
+        const buildingAssignmentProvided = hasDeveloperBuildingAssignment(req.body);
+        const buildingIds = normalizeDeveloperBuildingIds(req.body);
         const updates = { name, username, email, phone };
 
         if (password && password.trim()) {
@@ -369,22 +565,27 @@ router.put('/developers/:id', validate(registerBaseSchema.partial()), async (req
             updates.password = await bcrypt.hash(password, saltRounds);
         }
 
+        const existingDeveloper = await User.findById(req.params.id);
+        if (!existingDeveloper) {
+            return res.status(404).json({ message: 'Developer not found' });
+        }
+
+        if (buildingAssignmentProvided) {
+            const buildingIdsError = await getBuildingIdsValidationError(buildingIds, existingDeveloper._id);
+
+            if (buildingIdsError) {
+                return res.status(400).json({ message: buildingIdsError });
+            }
+        }
+
         const developer = await User.findByIdAndUpdate(
             req.params.id,
             updates,
             { new: true }
         );
-        if (!developer) {
-            return res.status(404).json({ message: 'Developer not found' });
-        }
 
-        if (buildingId !== undefined) {
-            // Unset this developer from any other buildings
-            await Building.updateMany({ developerId: developer._id }, { $unset: { developerId: "" } });
-            if (buildingId) {
-                // Assign to new building
-                await Building.findByIdAndUpdate(buildingId, { developerId: developer._id });
-            }
+        if (buildingAssignmentProvided) {
+            await assignBuildingsToDeveloper(existingDeveloper._id, buildingIds);
         }
 
         await logActivity('developer_updated', `Developer Updated: ${developer.name}`, {
@@ -419,7 +620,9 @@ router.delete('/developers/:id', async (req, res) => {
 // GET /customers
 router.get('/customers', async (req, res) => {
     try {
-        const customers = await User.find({ role: 'client' }).lean();
+        const customers = await User.find({ role: 'client' })
+            .select('-password -secretAnswer -secretQuestion')
+            .lean();
 
         // Populate subscription details manually or via virtuals if set up
         // Since we separated models, we need to fetch subscriptions
@@ -454,12 +657,15 @@ router.get('/customers', async (req, res) => {
             const primaryCar = carsForUser[0] || null;
             const primarySub = userSubs.find(s => ['active', 'on_hold'].includes(s.status)) || userSubs[0] || null;
             const carPhotoUrl = primaryCar?.photoUrl || null;
+            const { canDeleteAccount, deleteBlockedReason } = getCustomerDeleteState(carsForUser, userSubs);
 
             return {
-                ...customer,
+                ...sanitizeCustomerRecord(customer),
                 subscription: primarySub,
                 carPhotoUrl,
                 cars: carsForUser,
+                canDeleteAccount,
+                deleteBlockedReason,
                 primaryCarSummary: primaryCar
                     ? {
                         make: primaryCar.make,
@@ -479,11 +685,61 @@ router.get('/customers', async (req, res) => {
     }
 });
 
+// PUT /customers/:id/profile
+router.put('/customers/:id/profile', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const nextPassword = String(req.body?.password || '').trim();
+
+        if (!Types.ObjectId.isValid(id)) {
+            return res.status(400).json({ success: false, message: 'Invalid customer id' });
+        }
+
+        if (!nextPassword) {
+            return res.status(400).json({ success: false, message: 'Password is required' });
+        }
+
+        if (nextPassword.length < 6) {
+            return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
+        }
+
+        const customer = await User.findOne({ _id: id, role: 'client' });
+        if (!customer) {
+            return res.status(404).json({ success: false, message: 'Customer not found' });
+        }
+
+        const saltRounds = 10;
+        customer.password = await bcrypt.hash(nextPassword, saltRounds);
+        await customer.save();
+
+        res.json({
+            success: true,
+            message: 'Customer password updated successfully',
+            customer: sanitizeCustomerRecord(customer)
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
 // PUT /customers/:id/subscription
 router.put('/customers/:id/subscription', async (req, res) => {
     try {
-        const { status, carId } = req.body; // 'active', 'on_hold', 'cancelled'
+        const requestedStatus = normalizeAdminSubscriptionStatus(req.body?.status);
+        const { carId } = req.body || {};
         const userId = req.params.id;
+
+        if (!Types.ObjectId.isValid(userId)) {
+            return res.status(400).json({ success: false, message: 'Invalid customer id' });
+        }
+
+        if (carId && !Types.ObjectId.isValid(carId)) {
+            return res.status(400).json({ success: false, message: 'Invalid car id' });
+        }
+
+        if (!requestedStatus) {
+            return res.json({ success: false, message: 'Invalid status' });
+        }
 
         let subscription = null;
         if (carId) {
@@ -506,9 +762,16 @@ router.put('/customers/:id/subscription', async (req, res) => {
             return res.json({ success: false, message: 'Stripe subscription not configured. Status unchanged.' });
         }
 
+        if (!Array.isArray(subscription.statusHistory)) {
+            subscription.statusHistory = [];
+        }
+
         let stripeSubscription = null;
         try {
-            stripeSubscription = await stripe.subscriptions.retrieve(subscription.stripeSubscriptionId);
+            stripeSubscription = await withStripeTimeout(
+                stripe.subscriptions.retrieve(subscription.stripeSubscriptionId),
+                'Stripe request timed out while retrieving subscription. Status unchanged.'
+            );
         } catch (e) {
             console.error('Stripe retrieve failed:', e.message);
             const stripeMessage = e?.raw?.message || e?.message || 'Stripe retrieve failed. Status unchanged.';
@@ -516,7 +779,8 @@ router.put('/customers/:id/subscription', async (req, res) => {
         }
 
         const stripeStatus = String(stripeSubscription?.status || '').toLowerCase();
-        if (stripeStatus === 'canceled' || stripeStatus === 'cancelled') {
+        const currentLocalStatus = resolveLocalStatusFromStripe(stripeSubscription);
+        if (currentLocalStatus === 'cancelled') {
             if (subscription.status !== 'cancelled') {
                 subscription.status = 'cancelled';
                 subscription.endDate = new Date();
@@ -525,7 +789,7 @@ router.put('/customers/:id/subscription', async (req, res) => {
             }
 
             const alreadyCancelledMessage = 'Subscription already cancelled on Stripe.';
-            if (status === 'cancelled') {
+            if (requestedStatus === 'cancelled') {
                 return res.json({ success: true, message: alreadyCancelledMessage, subscription });
             }
 
@@ -536,29 +800,47 @@ router.put('/customers/:id/subscription', async (req, res) => {
             });
         }
 
-        if (!['active', 'on_hold', 'cancelled'].includes(status)) {
-            return res.json({ success: false, message: 'Invalid status' });
+        if (requestedStatus === currentLocalStatus) {
+            subscription.status = currentLocalStatus;
+            if (stripeSubscription?.current_period_start) {
+                subscription.startDate = new Date(stripeSubscription.current_period_start * 1000);
+            }
+            if (stripeSubscription?.current_period_end) {
+                subscription.endDate = new Date(stripeSubscription.current_period_end * 1000);
+            }
+            subscription.statusHistory.push({ status: currentLocalStatus, action: 'admin_sync_noop' });
+            await subscription.save();
+            return res.json({ success: true, message: 'Subscription already in requested state', subscription });
         }
 
         const stripePaused = Boolean(stripeSubscription?.pause_collection);
         let updatedStripeSubscription = stripeSubscription;
 
         try {
-            if (status === 'cancelled') {
+            if (requestedStatus === 'cancelled') {
                 if (stripeStatus !== 'canceled' && stripeStatus !== 'cancelled') {
-                    updatedStripeSubscription = await stripe.subscriptions.cancel(subscription.stripeSubscriptionId);
+                    updatedStripeSubscription = await withStripeTimeout(
+                        stripe.subscriptions.cancel(subscription.stripeSubscriptionId),
+                        'Stripe request timed out while cancelling subscription. Status unchanged.'
+                    );
                 }
-            } else if (status === 'on_hold') {
+            } else if (requestedStatus === 'on_hold') {
                 if (!stripePaused) {
-                    updatedStripeSubscription = await stripe.subscriptions.update(subscription.stripeSubscriptionId, {
-                        pause_collection: { behavior: 'void' }
-                    });
+                    updatedStripeSubscription = await withStripeTimeout(
+                        stripe.subscriptions.update(subscription.stripeSubscriptionId, {
+                            pause_collection: { behavior: 'void' }
+                        }),
+                        'Stripe request timed out while putting subscription on hold. Status unchanged.'
+                    );
                 }
-            } else if (status === 'active') {
+            } else if (requestedStatus === 'active') {
                 if (stripePaused) {
-                    updatedStripeSubscription = await stripe.subscriptions.update(subscription.stripeSubscriptionId, {
-                        pause_collection: null
-                    });
+                    updatedStripeSubscription = await withStripeTimeout(
+                        stripe.subscriptions.update(subscription.stripeSubscriptionId, {
+                            pause_collection: null
+                        }),
+                        'Stripe request timed out while reactivating subscription. Status unchanged.'
+                    );
                 }
             }
         } catch (e) {
@@ -581,15 +863,7 @@ router.put('/customers/:id/subscription', async (req, res) => {
             return res.json({ success: false, message: stripeMessage });
         }
 
-        const updatedStripeStatus = String(updatedStripeSubscription?.status || '').toLowerCase();
-        const updatedPaused = Boolean(updatedStripeSubscription?.pause_collection);
-
-        let nextLocalStatus = 'inactive';
-        if (updatedStripeStatus === 'canceled' || updatedStripeStatus === 'cancelled') {
-            nextLocalStatus = 'cancelled';
-        } else if (updatedStripeStatus === 'active' || updatedStripeStatus === 'trialing') {
-            nextLocalStatus = updatedPaused ? 'on_hold' : 'active';
-        }
+        const nextLocalStatus = resolveLocalStatusFromStripe(updatedStripeSubscription);
 
         subscription.status = nextLocalStatus;
 
@@ -613,6 +887,54 @@ router.put('/customers/:id/subscription', async (req, res) => {
 
         await subscription.save();
         res.json({ success: true, message: 'Subscription status updated', subscription });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// DELETE /customers/:id
+router.delete('/customers/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        if (!Types.ObjectId.isValid(id)) {
+            return res.status(400).json({ success: false, message: 'Invalid customer id' });
+        }
+
+        const customer = await User.findOne({ _id: id, role: 'client' }).select('name');
+        if (!customer) {
+            return res.status(404).json({ success: false, message: 'Customer not found' });
+        }
+
+        const [cars, subscriptions] = await Promise.all([
+            Car.find({ clientId: id }).lean(),
+            Subscription.find({ userId: id }).sort({ createdAt: -1 }).lean(),
+        ]);
+
+        const { canDeleteAccount, deleteBlockedReason } = getCustomerDeleteState(cars, subscriptions);
+        if (!canDeleteAccount) {
+            return res.status(400).json({
+                success: false,
+                message: deleteBlockedReason || 'Customer cannot be deleted yet.'
+            });
+        }
+
+        const carIds = cars.map((car) => car._id);
+
+        await Schedule.deleteMany({ clientId: id });
+        await WashRecord.deleteMany({
+            $or: [
+                { clientId: id },
+                ...(carIds.length ? [{ carId: { $in: carIds } }] : [])
+            ]
+        });
+        await Review.deleteMany({ clientId: id });
+        await Contact.deleteMany({ userId: id });
+        await Subscription.deleteMany({ userId: id });
+        await Car.deleteMany({ clientId: id });
+        await User.deleteOne({ _id: id, role: 'client' });
+
+        res.json({ success: true, message: 'Customer deleted successfully' });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }
@@ -649,6 +971,191 @@ router.get('/subscriptions', async (req, res) => {
         res.json(subscriptions);
     } catch (error) {
         res.status(500).json({ message: error.message });
+    }
+});
+
+// GET /subscriptions/stripe-sync - Stripe subscriptions that have no matching local record.
+// Covers subscriptions an admin created directly in the Stripe dashboard instead of through the app.
+router.get('/subscriptions/stripe-sync', async (req, res) => {
+    try {
+        if (!stripe) {
+            return res.json({
+                success: false,
+                message: 'Stripe is not configured on the server.',
+                unmatched: [],
+                unmatchedCount: 0,
+                totalStripeSubscriptions: 0
+            });
+        }
+
+        const localSubs = await Subscription.find({ stripeSubscriptionId: { $ne: null } })
+            .select('stripeSubscriptionId')
+            .lean();
+        const localIds = new Set(localSubs.map((s) => s.stripeSubscriptionId));
+
+        const plans = await SubscriptionPlan.find({ stripePriceId: { $ne: null } }).lean();
+        const planByPriceId = new Map(plans.map((p) => [p.stripePriceId, p]));
+
+        const unmatched = [];
+        let totalStripeSubscriptions = 0;
+
+        const stripeSubscriptions = await withStripeTimeout(
+            (async () => {
+                const list = [];
+                const iterator = stripe.subscriptions.list({
+                    limit: 100,
+                    status: 'all',
+                    expand: ['data.customer', 'data.items.data.price']
+                });
+                for await (const sub of iterator) {
+                    list.push(sub);
+                }
+                return list;
+            })(),
+            'Stripe request timed out while listing subscriptions.'
+        );
+
+        stripeSubscriptions.forEach((sub) => {
+            totalStripeSubscriptions += 1;
+            if (localIds.has(sub.id)) return;
+
+            const price = sub.items?.data?.[0]?.price || null;
+            const customer = sub.customer && typeof sub.customer === 'object' ? sub.customer : null;
+            const suggestedPlan = price?.id ? planByPriceId.get(price.id) : null;
+
+            unmatched.push({
+                stripeSubscriptionId: sub.id,
+                status: sub.status,
+                customerId: customer?.id || (typeof sub.customer === 'string' ? sub.customer : null),
+                customerEmail: customer?.email || null,
+                customerName: customer?.name || null,
+                priceId: price?.id || null,
+                amount: typeof price?.unit_amount === 'number' ? price.unit_amount / 100 : null,
+                currency: price?.currency || null,
+                currentPeriodEnd: sub.current_period_end ? new Date(sub.current_period_end * 1000) : null,
+                created: sub.created ? new Date(sub.created * 1000) : null,
+                suggestedPlanId: suggestedPlan ? String(suggestedPlan._id) : null,
+                suggestedPlanLabel: suggestedPlan ? `${suggestedPlan.carType} - ${suggestedPlan.planType}` : null
+            });
+        });
+
+        res.json({
+            success: true,
+            unmatched,
+            unmatchedCount: unmatched.length,
+            totalStripeSubscriptions
+        });
+    } catch (error) {
+        console.error('Stripe subscriptions sync failed:', error.message);
+        const stripeMessage = error?.raw?.message || error.message;
+        res.status(500).json({ success: false, message: stripeMessage, unmatched: [], unmatchedCount: 0, totalStripeSubscriptions: 0 });
+    }
+});
+
+// POST /subscriptions/assign - link an unmatched Stripe subscription to a customer's car
+router.post('/subscriptions/assign', async (req, res) => {
+    try {
+        if (!stripe) {
+            return res.status(500).json({ success: false, message: 'Stripe is not configured on the server.' });
+        }
+
+        const { stripeSubscriptionId, userId, carId, planId } = req.body || {};
+
+        if (!stripeSubscriptionId || !userId || !carId || !planId) {
+            return res.status(400).json({ success: false, message: 'stripeSubscriptionId, userId, carId and planId are all required.' });
+        }
+
+        if (!Types.ObjectId.isValid(userId) || !Types.ObjectId.isValid(carId) || !Types.ObjectId.isValid(planId)) {
+            return res.status(400).json({ success: false, message: 'Invalid userId, carId or planId.' });
+        }
+
+        const existing = await Subscription.findOne({ stripeSubscriptionId });
+        if (existing) {
+            return res.status(409).json({
+                success: false,
+                message: 'This Stripe subscription is already linked to a subscription record.',
+                subscription: existing
+            });
+        }
+
+        const [user, car, plan] = await Promise.all([
+            User.findOne({ _id: userId, role: 'client' }),
+            Car.findById(carId),
+            SubscriptionPlan.findById(planId)
+        ]);
+
+        if (!user) return res.status(404).json({ success: false, message: 'Customer not found.' });
+        if (!car) return res.status(404).json({ success: false, message: 'Car not found.' });
+        if (car.clientId.toString() !== userId.toString()) {
+            return res.status(400).json({ success: false, message: 'That car does not belong to the selected customer.' });
+        }
+        if (!plan) return res.status(404).json({ success: false, message: 'Subscription plan not found.' });
+
+        let stripeSub;
+        try {
+            stripeSub = await withStripeTimeout(
+                stripe.subscriptions.retrieve(stripeSubscriptionId, { expand: ['customer'] }),
+                'Stripe request timed out while retrieving subscription.'
+            );
+        } catch (e) {
+            const stripeMessage = e?.raw?.message || e?.message || 'Could not retrieve this subscription from Stripe.';
+            return res.status(404).json({ success: false, message: stripeMessage });
+        }
+
+        const localStatus = resolveLocalStatusFromStripe(stripeSub);
+        if (localStatus === 'cancelled') {
+            return res.status(409).json({ success: false, message: 'This Stripe subscription is already cancelled and cannot be assigned.' });
+        }
+
+        // Backfill the customer's Stripe id if it was never set - only when it isn't already
+        // pointing somewhere else, so we never overwrite an existing, unrelated link.
+        const stripeCustomerId = typeof stripeSub.customer === 'string' ? stripeSub.customer : stripeSub.customer?.id;
+        if (stripeCustomerId && !user.stripeCustomerId) {
+            user.stripeCustomerId = stripeCustomerId;
+            await user.save();
+        }
+
+        // Mirror the "one active/on_hold subscription per car" rule enforced on the normal subscribe flow.
+        await Subscription.updateMany(
+            { carId, status: { $in: ['active', 'on_hold'] } },
+            {
+                status: 'cancelled',
+                endDate: new Date(),
+                $push: { statusHistory: { status: 'cancelled', action: 'system_cancel_new_sub', timestamp: new Date() } }
+            }
+        );
+
+        const newSubscription = new Subscription({
+            userId,
+            carId,
+            planId: String(planId),
+            status: localStatus,
+            startDate: stripeSub.current_period_start ? new Date(stripeSub.current_period_start * 1000) : new Date(),
+            endDate: stripeSub.current_period_end ? new Date(stripeSub.current_period_end * 1000) : undefined,
+            stripeSubscriptionId: stripeSub.id,
+            planDetails: {
+                type: plan.planType,
+                carType: plan.carType,
+                price: plan.price,
+                features: plan.features,
+                washFrequency: plan.washFrequency
+            },
+            statusHistory: [{ status: localStatus, action: 'admin_assign_existing_stripe_subscription', timestamp: new Date() }]
+        });
+
+        await newSubscription.save();
+
+        await logActivity(
+            'subscription_assigned',
+            `Admin linked existing Stripe subscription ${stripeSub.id} to ${user.name}'s ${car.make} ${car.model}`,
+            { userId, carId, stripeSubscriptionId: stripeSub.id }
+        );
+
+        res.status(201).json({ success: true, message: 'Subscription linked successfully.', subscription: newSubscription });
+    } catch (error) {
+        console.error('Failed to assign Stripe subscription:', error.message);
+        const stripeMessage = error?.raw?.message || error.message;
+        res.status(500).json({ success: false, message: stripeMessage });
     }
 });
 

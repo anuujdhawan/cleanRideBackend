@@ -14,7 +14,13 @@ dotenv.config({ path: path.join(__dirname, '.env') });
 const app = express();
 app.use(cors());
 // app.use(cookieParser());
-app.use(express.json());
+// Capture the raw request body alongside the parsed one so the Stripe webhook route
+// can verify the signature Stripe sends (it must be checked against the exact raw bytes).
+app.use(express.json({
+    verify: (req, res, buf) => {
+        req.rawBody = buf;
+    }
+}));
 app.use('/public', express.static(path.join(__dirname, 'public')));
 
 // Connect to MongoDB
@@ -66,6 +72,7 @@ app.use('/api/developer', require('./routes/developer'));
 app.use('/api/buildings', require('./routes/buildings'));
 app.use('/api/brands', require('./routes/brands'));
 app.use('/api/payment', require('./routes/payment'));
+app.use('/api/webhooks/stripe', require('./routes/stripeWebhook'));
 
 const startServer = async () => {
   const ok = await connectToDatabase();

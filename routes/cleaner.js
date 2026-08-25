@@ -10,12 +10,65 @@ const { resolveCarPhotoUrl } = require('../utils/carPhotoUrl');
 const { sendExpoPushNotifications } = require('../utils/expoPush');
 
 const pushDebugEnabled = process.env.ENABLE_PUSH_DEBUG === 'true';
+const BUSINESS_TIME_ZONE = process.env.BUSINESS_TIME_ZONE || process.env.APP_TIME_ZONE || 'Asia/Dubai';
+const DEFAULT_WASH_DAY_PATTERN = 'Mon,Wed,Fri';
+const WASH_DAY_PATTERNS = {
+    'Mon,Wed,Fri': [1, 3, 5],
+    'Tue,Thu,Sat': [2, 4, 6]
+};
+const DAY_NAME_ALIASES = {
+    Sun: 0,
+    Sunday: 0,
+    Mon: 1,
+    Monday: 1,
+    Tue: 2,
+    Tuesday: 2,
+    Wed: 3,
+    Wednesday: 3,
+    Thu: 4,
+    Thursday: 4,
+    Fri: 5,
+    Friday: 5,
+    Sat: 6,
+    Saturday: 6
+};
+const INDEX_TO_DAY_NAME = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const COMPACT_WASH_DAY_ALIASES = {
+    mwf: 'Mon,Wed,Fri',
+    tts: 'Tue,Thu,Sat'
+};
+
+const getDateKeyParts = (value) => {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: BUSINESS_TIME_ZONE,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+    });
+    const parts = formatter.formatToParts(new Date(value));
+    const year = parts.find((part) => part.type === 'year')?.value;
+    const month = parts.find((part) => part.type === 'month')?.value;
+    const day = parts.find((part) => part.type === 'day')?.value;
+    if (!year || !month || !day) {
+        return null;
+    }
+    return { year, month, day };
+};
 
 const toLocalDateKey = (value) => {
+    const parts = getDateKeyParts(value);
+    if (!parts) return null;
+    const { year, month, day } = parts;
+    return `${year}-${month}-${day}`;
+};
+
+const toUtcDateMarker = (year, monthIndex, day) => new Date(Date.UTC(year, monthIndex, day, 12, 0, 0, 0));
+
+const markerToDateKey = (value) => {
     const date = new Date(value);
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
+    const year = date.getUTCFullYear();
+    const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(date.getUTCDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
 };
 
@@ -26,49 +79,73 @@ const parseLocalDateKey = (value) => {
     const year = Number(match[1]);
     const monthIndex = Number(match[2]) - 1;
     const day = Number(match[3]);
-    const parsed = new Date(year, monthIndex, day, 0, 0, 0, 0);
+    const parsed = toUtcDateMarker(year, monthIndex, day);
     if (
-        parsed.getFullYear() !== year ||
-        parsed.getMonth() !== monthIndex ||
-        parsed.getDate() !== day
+        parsed.getUTCFullYear() !== year ||
+        parsed.getUTCMonth() !== monthIndex ||
+        parsed.getUTCDate() !== day
     ) {
         return null;
     }
     return parsed;
 };
 
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const getFallbackWashDayPattern = (clientIndex) => {
+    const cycleIndex = clientIndex % 120;
+    return cycleIndex < 50 ? 'Mon,Wed,Fri' : 'Tue,Thu,Sat';
+};
+
+const normalizeWashDayPattern = (value, fallbackPattern = DEFAULT_WASH_DAY_PATTERN) => {
+    const raw = typeof value === 'string' ? value.trim() : '';
+    if (WASH_DAY_PATTERNS[raw]) return raw;
+
+    const compactAlias = COMPACT_WASH_DAY_ALIASES[raw.toLowerCase()];
+    if (compactAlias) return compactAlias;
+
+    const resolvedDays = raw
+        .split(',')
+        .map((part) => {
+            const trimmed = part.trim();
+            const aliasKey = Object.keys(DAY_NAME_ALIASES).find(
+                (dayName) => dayName.toLowerCase() === trimmed.toLowerCase()
+            );
+            return aliasKey ? DAY_NAME_ALIASES[aliasKey] : undefined;
+        })
+        .filter((dayIndex) => typeof dayIndex === 'number');
+
+    if (resolvedDays.length) {
+        const uniqueDays = [...new Set(resolvedDays)].sort((a, b) => a - b);
+        const normalized = uniqueDays.map((dayIndex) => INDEX_TO_DAY_NAME[dayIndex]).join(',');
+        if (WASH_DAY_PATTERNS[normalized]) {
+            return normalized;
+        }
+    }
+
+    return WASH_DAY_PATTERNS[fallbackPattern] ? fallbackPattern : DEFAULT_WASH_DAY_PATTERN;
+};
+
+const getScheduleDays = (pattern) => WASH_DAY_PATTERNS[pattern] || WASH_DAY_PATTERNS[DEFAULT_WASH_DAY_PATTERN];
+
 // GET /building-clients
 router.get('/building-clients', async (req, res) => {
     try {
         const { buildingName } = req.query;
+        const todayOnly = String(req.query.todayOnly ?? 'true').toLowerCase() !== 'false';
         if (!buildingName) {
             return res.status(400).json({ message: 'Building name is required' });
         }
 
-        const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
         const now = new Date();
-        const today = days[now.getDay()];
+        const todayDateKey = toLocalDateKey(now);
+        const todayMarker = parseLocalDateKey(todayDateKey);
 
-        // Helper to get last scheduled day for a pattern
-        const getLastScheduledDay = (pattern, date) => {
-            const d = new Date(date);
-            const mwf = [1, 3, 5]; // Mon, Wed, Fri
-            const tts = [2, 4, 6]; // Tue, Thu, Sat
-            const targetDays = pattern === 'Mon,Wed,Fri' ? mwf : tts;
+        const isScheduledDay = (date, scheduledDays) => scheduledDays.includes(date.getUTCDay());
 
-            // Check today first
-            if (targetDays.includes(d.getDay())) return new Date(d.setHours(0, 0, 0, 0));
-
-            // Look back up to 6 days
-            for (let i = 1; i <= 6; i++) {
-                const prev = new Date(date);
-                prev.setDate(prev.getDate() - i);
-                if (targetDays.includes(prev.getDay())) return new Date(prev.setHours(0, 0, 0, 0));
-            }
-            return null;
-        };
-
-        const allClients = await User.find({ role: 'client', buildingName });
+        const buildingNameMatcher = new RegExp(`^\\s*${escapeRegex(String(buildingName).trim())}\\s*$`, 'i');
+        const allClients = await User.find({ role: 'client', buildingName: buildingNameMatcher })
+            .sort({ createdAt: 1, _id: 1 });
         const clientIds = allClients.map((client) => client._id);
         const cars = await Car.find({ clientId: { $in: clientIds } }).sort({ createdAt: -1 }).lean();
         const carById = new Map();
@@ -86,137 +163,156 @@ router.get('/building-clients', async (req, res) => {
             status: 'active'
         }).sort({ createdAt: -1 }).lean();
         const subscriptionsByClient = new Map();
-        const seenSubscriptionKeys = new Set();
         subscriptions.forEach((sub) => {
             const userKey = sub.userId?.toString?.() || String(sub.userId);
-            const carKey = sub.carId ? sub.carId.toString() : 'no-car';
-            const dedupeKey = `${userKey}:${carKey}`;
-            if (seenSubscriptionKeys.has(dedupeKey)) return;
-            seenSubscriptionKeys.add(dedupeKey);
             const list = subscriptionsByClient.get(userKey) || [];
             list.push(sub);
             subscriptionsByClient.set(userKey, list);
         });
         const result = [];
 
-        for (const client of allClients) {
+        for (let clientIndex = 0; clientIndex < allClients.length; clientIndex += 1) {
+            const client = allClients[clientIndex];
             const clientCars = carsByClient.get(client._id.toString()) || [];
             const clientSubscriptions = subscriptionsByClient.get(client._id.toString()) || [];
             if (!clientSubscriptions.length) continue;
 
-            const hasSingleCar = clientCars.length === 1;
+            const washDayPattern = normalizeWashDayPattern(
+                client.washDays,
+                getFallbackWashDayPattern(clientIndex)
+            );
+            const scheduledDays = getScheduleDays(washDayPattern);
+            const assignedCarIds = new Set();
+            const unresolvedSubscriptions = [];
+            const scheduleRows = [];
+
             for (const subscription of clientSubscriptions) {
+                const subscriptionCarId = subscription.carId?.toString?.();
+                const subscriptionCar = subscriptionCarId ? carById.get(subscriptionCarId) : null;
+                const belongsToClient = subscriptionCar?.clientId?.toString?.() === client._id.toString();
+
+                if (!subscriptionCar || !belongsToClient) {
+                    unresolvedSubscriptions.push(subscription);
+                    continue;
+                }
+
+                if (assignedCarIds.has(subscriptionCarId)) continue;
+                assignedCarIds.add(subscriptionCarId);
+                scheduleRows.push({ subscription, car: subscriptionCar });
+            }
+
+            const fallbackCars = clientCars.filter((car) => !assignedCarIds.has(car._id.toString()));
+            for (const subscription of unresolvedSubscriptions) {
+                const fallbackCar = fallbackCars.shift();
+                if (!fallbackCar) continue;
+                assignedCarIds.add(fallbackCar._id.toString());
+                scheduleRows.push({ subscription, car: fallbackCar });
+            }
+
+            for (const { subscription, car } of scheduleRows) {
                 const planName = subscription?.planDetails?.type || subscription?.planDetails?.planType || null;
-                let car = null;
-                if (subscription.carId) {
-                    car = carById.get(subscription.carId.toString());
-                }
-                if (!car && hasSingleCar) {
-                    car = clientCars[0];
-                }
-                if (!car) continue;
+                const carPhotoUrl = resolveCarPhotoUrl(req, car?.photo);
+                const baseRow = {
+                    ...client.toObject(),
+                    planName,
+                    carPhotoUrl,
+                    washDays: washDayPattern,
+                    subscriptionStatus: subscription.status,
+                    carDetails: car ? {
+                        _id: car._id,
+                        make: car.make,
+                        model: car.model,
+                        color: car.color,
+                        licensePlate: car.licensePlate,
+                        parkingSlot: car.parkingSlot,
+                        type: car.type
+                    } : null
+                };
 
-                const carQuery = hasSingleCar
-                    ? { $or: [{ carId: car._id }, { carId: { $exists: false } }, { carId: null }] }
-                    : { carId: car._id };
-
-                // 1. Check if washed TODAY
-                const todayStart = new Date(now);
-                todayStart.setHours(0, 0, 0, 0);
-                const todayEnd = new Date(now);
-                todayEnd.setHours(23, 59, 59, 999);
-
-                const washedToday = await WashRecord.findOne({
-                    clientId: client._id,
-                    ...carQuery,
-                    washDate: { $gte: todayStart, $lte: todayEnd }
-                });
-
-                if (washedToday) {
-                    const carPhotoUrl = resolveCarPhotoUrl(req, car?.photo);
+                if (!todayOnly) {
                     result.push({
-                        ...client.toObject(),
-                        status: 'washed',
-                        pendingForDate: null,
-                        planName,
-                        carPhotoUrl,
-                        carDetails: car ? {
-                            _id: car._id,
-                            make: car.make,
-                            model: car.model,
-                            color: car.color,
-                            licensePlate: car.licensePlate,
-                            parkingSlot: car.parkingSlot,
-                            type: car.type
-                        } : null
+                        ...baseRow,
+                        status: subscription.status
                     });
                     continue;
                 }
 
-                // 2. If not washed today, determine if it's scheduled or pending
-                const lastScheduled = getLastScheduledDay(client.washDays, now);
-                if (!lastScheduled) continue;
+                // Calculate status for todayOnly view
+                let status = 'scheduled';
+                let pendingForDate = null;
 
-                const isScheduledToday = lastScheduled.toDateString() === now.toDateString();
-
-                if (isScheduledToday) {
-                    const carPhotoUrl = resolveCarPhotoUrl(req, car?.photo);
-                    result.push({
-                        ...client.toObject(),
-                        status: 'scheduled',
-                        pendingForDate: null,
-                        planName,
-                        carPhotoUrl,
-                        carDetails: car ? {
-                            _id: car._id,
-                            make: car.make,
-                            model: car.model,
-                            color: car.color,
-                            licensePlate: car.licensePlate,
-                            parkingSlot: car.parkingSlot,
-                            type: car.type
-                        } : null
-                    });
-                } else {
-                    // Check if it was washed on its last scheduled day
-                    const schedStart = new Date(lastScheduled);
-                    const schedEnd = new Date(lastScheduled);
-                    schedEnd.setHours(23, 59, 59, 999);
-
-                    const washedOnSchedDay = await WashRecord.findOne({
+                try {
+                    // Query wash records for THIS specific car only to prevent
+                    // old records (without carId or from another car) from fulfilling
+                    // scheduled days for the current car
+                    const washRecords = await WashRecord.find({
                         clientId: client._id,
-                        $and: [
-                            carQuery,
-                            {
-                                $or: [
-                                    { washDate: { $gte: schedStart, $lte: schedEnd } },
-                                    { washForDate: { $gte: schedStart, $lte: schedEnd } }
-                                ]
-                            }
+                        carId: car._id,
+                        $or: [
+                            { washDate: { $lte: now } },
+                            { washForDate: { $ne: null, $lte: todayMarker } }
                         ]
-                    });
+                    }).lean();
 
-                    if (!washedOnSchedDay) {
-                        // Missed the last scheduled day -> Pending
-                        const carPhotoUrl = resolveCarPhotoUrl(req, car?.photo);
-                        result.push({
-                            ...client.toObject(),
-                            status: 'pending',
-                            pendingForDate: toLocalDateKey(lastScheduled),
-                            planName,
-                            carPhotoUrl,
-                            carDetails: car ? {
-                                _id: car._id,
-                                make: car.make,
-                                model: car.model,
-                                color: car.color,
-                                licensePlate: car.licensePlate,
-                                parkingSlot: car.parkingSlot,
-                                type: car.type
-                            } : null
-                        });
+                    const fulfilledDateKeys = new Set();
+                    let washedToday = false;
+                    for (const washRecord of washRecords) {
+                        if (washRecord?.washDate) {
+                            const washDateKey = toLocalDateKey(washRecord.washDate);
+                            if (washDateKey === todayDateKey) {
+                                washedToday = true;
+                            }
+                            const washDateMarker = parseLocalDateKey(washDateKey);
+                            if (washDateMarker && isScheduledDay(washDateMarker, scheduledDays)) {
+                                fulfilledDateKeys.add(washDateKey);
+                            }
+                        }
+                        if (washRecord?.washForDate) {
+                            fulfilledDateKeys.add(toLocalDateKey(washRecord.washForDate));
+                        }
                     }
+
+                    if (washedToday) {
+                        status = 'washed';
+                    } else {
+                        // 1. Walk backwards from yesterday → first missed scheduled day → 'pending'
+                        let foundPending = false;
+                        const maxLookbackDays = 14;
+                        for (let daysBack = 1; daysBack <= maxLookbackDays; daysBack++) {
+                            const checkDate = new Date(todayMarker);
+                            checkDate.setUTCDate(checkDate.getUTCDate() - daysBack);
+                            const checkDay = checkDate.getUTCDay();
+                            if (!scheduledDays.includes(checkDay)) continue;
+                            const checkKey = markerToDateKey(checkDate);
+                            if (!fulfilledDateKeys.has(checkKey)) {
+                                status = 'pending';
+                                pendingForDate = checkKey;
+                                foundPending = true;
+                                break;
+                            }
+                        }
+
+                        // 2. No past missed washes → if today is a scheduled day → 'scheduled'
+                        if (!foundPending) {
+                            const todayDay = todayMarker?.getUTCDay?.();
+                            if (todayDay !== undefined && scheduledDays.includes(todayDay)) {
+                                status = 'scheduled';
+                            } else {
+                                status = 'scheduled';
+                            }
+                        }
+                    }
+                } catch (carError) {
+                    console.error(`Error calculating status for car ${car?._id} (client ${client._id}):`, carError);
+                    status = 'pending';
+                    pendingForDate = todayDateKey;
                 }
+
+                result.push({
+                    ...baseRow,
+                    status,
+                    pendingForDate
+                });
             }
         }
 
@@ -243,7 +339,11 @@ router.post('/record-wash', async (req, res) => {
 
         const now = new Date();
         const washDate = now;
-        const washTime = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const washTime = now.toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+            timeZone: BUSINESS_TIME_ZONE
+        });
 
         const newWash = new WashRecord({
             clientId,

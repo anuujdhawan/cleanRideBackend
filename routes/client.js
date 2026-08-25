@@ -663,8 +663,25 @@ router.post('/save-push-token', verifyToken, async (req, res) => {
         if (!Expo.isExpoPushToken(token)) {
             return res.status(400).json({ message: 'Invalid Expo push token' });
         }
+        await User.updateMany(
+            { _id: { $ne: resolvedUserId }, pushToken: token },
+            { $unset: { pushToken: 1 } }
+        );
         await User.findByIdAndUpdate(resolvedUserId, { pushToken: token });
         res.json({ message: 'Push token saved' });
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+router.delete('/push-token', verifyToken, async (req, res) => {
+    try {
+        const userId = req.user?.userId;
+        if (!userId) {
+            return res.status(400).json({ message: 'User ID required' });
+        }
+        await User.findByIdAndUpdate(userId, { $unset: { pushToken: 1 } });
+        res.json({ message: 'Push token cleared' });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }

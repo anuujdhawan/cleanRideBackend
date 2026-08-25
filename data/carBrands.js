@@ -165,6 +165,20 @@ module.exports = [
         models: ['Wrangler', 'Grand Cherokee', 'Cherokee', 'Compass', 'Gladiator', 'Renegade', 'Other']
     },
     {
+        name: 'Jetour',
+        logoFile: 'jetour.svg',
+        models: [
+            { name: 'T1', carType: 'mid-suv' },
+            { name: 'T2', carType: 'large-suv' },
+            { name: 'T2 i-DM', carType: 'large-suv' },
+            { name: 'Dashing', carType: 'mid-suv' },
+            { name: 'X70 Plus', carType: 'mid-suv' },
+            { name: 'X70', carType: 'mid-suv' },
+            { name: 'X90 Plus', carType: 'large-suv' },
+            'Other'
+        ]
+    },
+    {
         name: 'JAC',
         logoFile: 'JAC.svg',
         models: ['S3', 'S4', 'T8', 'JS4', 'JS8', 'Other']
