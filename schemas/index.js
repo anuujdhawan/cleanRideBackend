@@ -61,10 +61,24 @@ const profileUpdateSchema = z.object({
     path: ["name"]
 });
 
+const updateCarSchema = z.object({
+    make: z.string().min(1, 'Make cannot be empty').optional(),
+    model: z.string().min(1, 'Model cannot be empty').optional(),
+    type: z.string().min(1, 'Type cannot be empty').optional(),
+    licensePlate: z.string().min(1, 'License plate cannot be empty').optional(),
+    color: z.string().min(1, 'Color cannot be empty').optional(),
+    parkingSlot: z.string().min(1, 'Parking slot cannot be empty').optional(),
+    removePhoto: z.string().optional(),
+}).refine((data) => Object.keys(data).length > 0, {
+    message: 'At least one field is required to update the car',
+    path: ['make']
+});
+
 module.exports = {
     registerSchema,
     registerBaseSchema,
     loginSchema,
     carSchema,
     profileUpdateSchema,
+    updateCarSchema,
 };

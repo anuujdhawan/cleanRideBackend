@@ -45,6 +45,24 @@ const userSchema = new mongoose.Schema({
   stripeCustomerId: {
     type: String
   },
+  stripeDefaultPaymentMethodId: {
+    type: String
+  },
+  cardBrand: {
+    type: String
+  },
+  cardLast4: {
+    type: String
+  },
+  cardExpMonth: {
+    type: Number
+  },
+  cardExpYear: {
+    type: Number
+  },
+  cardUpdatedAt: {
+    type: Date
+  },
   buildingName: {
     type: String
   },

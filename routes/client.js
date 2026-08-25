@@ -1,6 +1,8 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const multer = require('multer');
+const crypto = require('crypto');
 const router = express.Router();
 
 // Load env vars even if the server is started from the project root
@@ -18,6 +20,8 @@ const bcrypt = require('bcrypt');
 const { resolveCarPhotoUrl, isAbsolutePhotoValue } = require('../utils/carPhotoUrl');
 const { sendExpoPushNotifications } = require('../utils/expoPush');
 const { Expo } = require('expo-server-sdk');
+const validate = require('../middleware/validate');
+const { updateCarSchema } = require('../schemas');
 
 let stripe = null;
 const stripeKey = process.env.STRIPE_SECRET_KEY;
@@ -119,6 +123,101 @@ const removeCarPhotoFile = async (photo) => {
             console.warn('Failed to remove car photo file:', error.message || error);
         }
     }
+};
+
+// --- Support for PUT /cars/:carId (edit car) below. Kept local to this file
+// rather than shared with auth.js's create-car helpers, to avoid touching that
+// (live, high-traffic) file for this addition.
+
+const normalizeCarType = (value) => {
+    if (!value) return 'sedan';
+    const normalized = String(value).toLowerCase().replace(/_/g, '-');
+    if (normalized.includes('hatch')) return 'hatchback';
+    if (normalized.includes('large') && normalized.includes('suv')) return 'large-suv';
+    if (normalized.includes('mid') && normalized.includes('suv')) return 'mid-suv';
+    if (normalized.includes('suv')) return 'mid-suv';
+    if (normalized.includes('sedan')) return 'sedan';
+    return 'sedan';
+};
+
+const useMemoryCarPhotoStorage = Boolean(process.env.VERCEL) || process.env.CAR_PHOTO_STORAGE === 'memory';
+
+const ensureCarPhotoDir = () => {
+    if (useMemoryCarPhotoStorage) return;
+    fs.mkdirSync(carPhotoDir, { recursive: true });
+};
+
+const carPhotoStorage = useMemoryCarPhotoStorage
+    ? multer.memoryStorage()
+    : multer.diskStorage({
+        destination: (req, file, cb) => {
+            ensureCarPhotoDir();
+            cb(null, carPhotoDir);
+        },
+        filename: (req, file, cb) => {
+            const ext = path.extname(file.originalname || '').toLowerCase() || '.jpg';
+            const unique = crypto.randomBytes(16).toString('hex');
+            cb(null, `${unique}${ext}`);
+        }
+    });
+
+const carPhotoUpload = multer({
+    storage: carPhotoStorage,
+    fileFilter: (req, file, cb) => {
+        if (file.mimetype && file.mimetype.startsWith('image/')) {
+            cb(null, true);
+        } else {
+            cb(new Error('Only image files are allowed'));
+        }
+    },
+    limits: { fileSize: 5 * 1024 * 1024 }
+});
+
+const maybeUploadCarPhoto = (req, res, next) => {
+    if (req.is('multipart')) {
+        return carPhotoUpload.single('carPhoto')(req, res, (err) => {
+            if (err) {
+                const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+                return res.status(status).json({ message: err.message });
+            }
+            return next();
+        });
+    }
+    next();
+};
+
+const resolveCarPhotoValue = (file) => {
+    if (!file) return null;
+    if (file.buffer) {
+        const mimeType = file.mimetype || 'image/jpeg';
+        const encoded = file.buffer.toString('base64');
+        return `data:${mimeType};base64,${encoded}`;
+    }
+    return file.filename || null;
+};
+
+// Mirrors the subscription lookup already inline in DELETE /cars/:carId below
+// (including its legacy fallback for pre-multi-car subscriptions that never
+// recorded a carId) so the edit-car guard can't be bypassed by that same edge
+// case. Deliberately not shared with the DELETE route's own copy, so that
+// route is left byte-for-byte untouched.
+const findActiveSubscriptionForCar = async (userId, carId) => {
+    let subscription = await Subscription.findOne({ userId, carId })
+        .sort({ createdAt: -1 })
+        .lean();
+
+    if (!subscription) {
+        const carCount = await Car.countDocuments({ clientId: userId });
+        if (carCount === 1) {
+            subscription = await Subscription.findOne({
+                userId,
+                status: { $in: ['active', 'on_hold'] },
+                $or: [{ carId: { $exists: false } }, { carId: null }]
+            }).sort({ createdAt: -1 }).lean();
+        }
+    }
+
+    return subscription;
 };
 
 // Middleware to verify token
@@ -546,7 +645,8 @@ router.get('/cars/:carId', async (req, res) => {
 
         const car = await Car.findOne({ _id: req.params.carId, clientId: userId }).lean();
         if (!car) return res.status(404).json({ message: 'Car not found' });
-        res.json({ ...car, photoUrl: buildCarPhotoUrl(req, car.photo) });
+        const subscription = await findActiveSubscriptionForCar(userId, car._id);
+        res.json({ ...car, photoUrl: buildCarPhotoUrl(req, car.photo), subscription: subscription || null });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
@@ -585,6 +685,73 @@ router.delete('/cars/:carId', async (req, res) => {
         await removeCarPhotoFile(car.photo);
         res.json({ message: 'Car deleted successfully' });
     } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// PUT /cars/:carId - edit an already-registered car's details.
+// Ownership is derived from the JWT (never trusted from the request body).
+// Car type may not be changed while a subscription for this car is active/on_hold,
+// since a subscription's plan pricing is locked in at subscribe-time and never
+// reconciled against the car afterward - see findActiveSubscriptionForCar above.
+router.put('/cars/:carId', verifyToken, maybeUploadCarPhoto, validate(updateCarSchema), async (req, res) => {
+    try {
+        const authUserId = req.user?.userId;
+        if (!authUserId) {
+            return res.status(401).json({ message: 'Invalid token payload' });
+        }
+
+        const car = await Car.findById(req.params.carId);
+        if (!car) {
+            return res.status(404).json({ message: 'Car not found' });
+        }
+        if (car.clientId.toString() !== authUserId.toString()) {
+            return res.status(403).json({ message: 'Unauthorized to update this car' });
+        }
+
+        const { make, model, type, licensePlate, color, parkingSlot, removePhoto } = req.body;
+        const updates = {};
+        if (make !== undefined) updates.make = String(make).trim();
+        if (model !== undefined) updates.model = String(model).trim();
+        if (licensePlate !== undefined) updates.licensePlate = String(licensePlate).trim();
+        if (color !== undefined) updates.color = String(color).trim();
+        if (parkingSlot !== undefined) updates.parkingSlot = String(parkingSlot).trim();
+
+        if (type !== undefined) {
+            const normalizedType = normalizeCarType(type);
+            if (normalizedType !== car.type) {
+                const subscription = await findActiveSubscriptionForCar(authUserId, car._id);
+                const subscriptionStatus = subscription?.status || 'inactive';
+                if (['active', 'on_hold'].includes(subscriptionStatus)) {
+                    return res.status(409).json({ message: 'Car type cannot be changed while a subscription is active or on hold.' });
+                }
+                updates.type = normalizedType;
+            }
+        }
+
+        let previousPhoto = null;
+        if (req.file) {
+            previousPhoto = car.photo;
+            updates.photo = resolveCarPhotoValue(req.file);
+        } else if (removePhoto === 'true') {
+            previousPhoto = car.photo;
+            updates.photo = undefined;
+        }
+
+        Object.assign(car, updates);
+        await car.save();
+
+        if (previousPhoto && previousPhoto !== car.photo) {
+            await removeCarPhotoFile(previousPhoto);
+        }
+
+        const carObject = car.toObject();
+        res.json({ message: 'Car updated successfully', car: { ...carObject, photoUrl: buildCarPhotoUrl(req, car.photo) } });
+    } catch (error) {
+        console.error('Update car error:', error);
+        if (error?.name === 'ValidationError' || error?.name === 'CastError') {
+            return res.status(400).json({ message: error.message });
+        }
         res.status(500).json({ message: error.message });
     }
 });
@@ -1156,6 +1323,292 @@ router.put('/subscription/:id', async (req, res) => {
         res.json({ message: 'Subscription updated', subscription });
     } catch (error) {
         res.status(500).json({ message: error.message });
+    }
+});
+
+// GET /payment-method - get the client's saved card (for display), lazily backfilling from Stripe
+router.get('/payment-method', verifyToken, async (req, res) => {
+    try {
+        const userId = req.user?.userId;
+        if (!userId) {
+            return res.status(400).json({ message: 'User ID required' });
+        }
+
+        const user = await User.findById(userId);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        if (!user.stripeCustomerId) {
+            return res.json({ card: null, hasStripeCustomer: false });
+        }
+
+        if (user.cardBrand && user.cardLast4) {
+            return res.json({
+                card: {
+                    brand: user.cardBrand,
+                    last4: user.cardLast4,
+                    expMonth: user.cardExpMonth,
+                    expYear: user.cardExpYear
+                },
+                hasStripeCustomer: true
+            });
+        }
+
+        if (!stripe) {
+            return res.json({ card: null, hasStripeCustomer: true });
+        }
+
+        // Lazy backfill for users who already had a card on file before this
+        // endpoint existed: check the customer's default payment method first...
+        let paymentMethod = null;
+        try {
+            const customer = await stripe.customers.retrieve(user.stripeCustomerId, {
+                expand: ['invoice_settings.default_payment_method']
+            });
+            const pm = customer?.invoice_settings?.default_payment_method;
+            if (pm && typeof pm === 'object') {
+                paymentMethod = pm;
+            }
+        } catch (error) {
+            console.warn('Failed to retrieve Stripe customer for payment method backfill:', error.message);
+        }
+
+        // ...and if that's empty, fall back to the most recent active subscription's
+        // default payment method (subscriptions created before this feature only ever
+        // got a per-subscription default, never a customer-level one).
+        if (!paymentMethod) {
+            const recentSub = await Subscription.findOne({
+                userId,
+                status: { $in: ['active', 'on_hold'] },
+                stripeSubscriptionId: { $exists: true, $ne: null }
+            }).sort({ createdAt: -1 });
+
+            if (recentSub?.stripeSubscriptionId) {
+                try {
+                    const stripeSub = await stripe.subscriptions.retrieve(recentSub.stripeSubscriptionId, {
+                        expand: ['default_payment_method']
+                    });
+                    const pm = stripeSub?.default_payment_method;
+                    if (pm && typeof pm === 'object') {
+                        paymentMethod = pm;
+                    }
+                } catch (error) {
+                    console.warn('Failed to retrieve Stripe subscription for payment method backfill:', error.message);
+                }
+            }
+        }
+
+        if (!paymentMethod?.card) {
+            return res.json({ card: null, hasStripeCustomer: true });
+        }
+
+        user.stripeDefaultPaymentMethodId = paymentMethod.id;
+        user.cardBrand = paymentMethod.card.brand;
+        user.cardLast4 = paymentMethod.card.last4;
+        user.cardExpMonth = paymentMethod.card.exp_month;
+        user.cardExpYear = paymentMethod.card.exp_year;
+        user.cardUpdatedAt = new Date();
+        await user.save();
+
+        res.json({
+            card: {
+                brand: user.cardBrand,
+                last4: user.cardLast4,
+                expMonth: user.cardExpMonth,
+                expYear: user.cardExpYear
+            },
+            hasStripeCustomer: true
+        });
+    } catch (error) {
+        console.error('Error fetching payment method:', error);
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// POST /payment-method/setup - start a card update: create a SetupIntent + ephemeral key
+router.post('/payment-method/setup', verifyToken, async (req, res) => {
+    try {
+        const userId = req.user?.userId;
+        if (!userId) {
+            return res.status(400).json({ message: 'User ID required' });
+        }
+
+        if (!stripe) {
+            return res.status(500).json({ message: 'Stripe is not configured on the server.' });
+        }
+
+        const user = await User.findById(userId);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        // Reuses the same lazy-create pattern as POST /subscribe so this never
+        // dead-ends for a user who hasn't subscribed to anything yet.
+        let stripeCustomerId = user.stripeCustomerId;
+        if (!stripeCustomerId) {
+            const customer = await stripe.customers.create({
+                email: user.email,
+                name: user.name,
+                phone: user.phone,
+                metadata: { userId: String(userId) }
+            });
+            stripeCustomerId = customer.id;
+            user.stripeCustomerId = stripeCustomerId;
+            await user.save();
+        }
+
+        const ephemeralKey = await stripe.ephemeralKeys.create(
+            { customer: stripeCustomerId },
+            { apiVersion: STRIPE_API_VERSION }
+        );
+
+        const setupIntent = await stripe.setupIntents.create({
+            customer: stripeCustomerId,
+            payment_method_types: ['card'],
+            usage: 'off_session'
+        });
+
+        res.status(200).json({
+            customerId: stripeCustomerId,
+            customerEphemeralKeySecret: ephemeralKey.secret,
+            setupIntentClientSecret: setupIntent.client_secret,
+            setupIntentId: setupIntent.id
+        });
+    } catch (error) {
+        console.error('Error starting payment method update:', error);
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// POST /payment-method/confirm - finalize a card update after the PaymentSheet succeeds:
+// makes the new card the customer's default, then switches every currently active/on_hold
+// subscription over to it (a user can have several subscriptions, one per car).
+router.post('/payment-method/confirm', verifyToken, async (req, res) => {
+    try {
+        const userId = req.user?.userId;
+        const { setupIntentId } = req.body;
+
+        if (!userId) {
+            return res.status(400).json({ message: 'User ID required' });
+        }
+        if (!setupIntentId) {
+            return res.status(400).json({ message: 'Missing setupIntentId' });
+        }
+        if (!stripe) {
+            return res.status(500).json({ message: 'Stripe is not configured on the server.' });
+        }
+
+        const user = await User.findById(userId);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        if (!user.stripeCustomerId) {
+            return res.status(404).json({ message: 'No Stripe customer found for this user.' });
+        }
+
+        const setupIntent = await stripe.setupIntents.retrieve(setupIntentId, {
+            expand: ['payment_method']
+        });
+
+        const setupIntentCustomerId = typeof setupIntent.customer === 'string'
+            ? setupIntent.customer
+            : setupIntent.customer?.id;
+        if (setupIntentCustomerId !== user.stripeCustomerId) {
+            return res.status(403).json({ message: 'Setup intent does not belong to this customer.' });
+        }
+
+        // Authoritative check - never trust the client's claim that the sheet succeeded.
+        if (setupIntent.status !== 'succeeded') {
+            return res.status(409).json({
+                message: setupIntent.last_setup_error?.message || 'Card setup was not completed successfully.',
+                status: setupIntent.status
+            });
+        }
+
+        const paymentMethod = setupIntent.payment_method;
+        const paymentMethodId = typeof paymentMethod === 'string' ? paymentMethod : paymentMethod?.id;
+        if (!paymentMethodId) {
+            return res.status(502).json({ message: 'Stripe did not return a payment method for this setup intent.' });
+        }
+
+        if (user.stripeDefaultPaymentMethodId === paymentMethodId) {
+            return res.json({
+                message: 'This is already your default payment method.',
+                card: {
+                    brand: user.cardBrand,
+                    last4: user.cardLast4,
+                    expMonth: user.cardExpMonth,
+                    expYear: user.cardExpYear
+                },
+                updatedSubscriptionCount: 0,
+                failedSubscriptions: []
+            });
+        }
+
+        // Anchor step: this must succeed before touching any subscription. The old card
+        // is left attached to the customer (not detached) so it isn't lost if needed again.
+        try {
+            await stripe.customers.update(user.stripeCustomerId, {
+                invoice_settings: { default_payment_method: paymentMethodId }
+            });
+        } catch (error) {
+            console.error('Failed to set customer default payment method:', error.message);
+            const stripeMessage = error?.raw?.message || error?.message || 'Failed to update default payment method.';
+            return res.status(502).json({ message: stripeMessage });
+        }
+
+        const cardDetails = typeof paymentMethod === 'object' ? paymentMethod.card : null;
+        user.stripeDefaultPaymentMethodId = paymentMethodId;
+        if (cardDetails) {
+            user.cardBrand = cardDetails.brand;
+            user.cardLast4 = cardDetails.last4;
+            user.cardExpMonth = cardDetails.exp_month;
+            user.cardExpYear = cardDetails.exp_year;
+        }
+        user.cardUpdatedAt = new Date();
+        await user.save();
+
+        const activeSubs = await Subscription.find({
+            userId,
+            status: { $in: ['active', 'on_hold'] },
+            stripeSubscriptionId: { $exists: true, $ne: null }
+        });
+
+        const results = await Promise.allSettled(
+            activeSubs.map((sub) =>
+                stripe.subscriptions.update(sub.stripeSubscriptionId, { default_payment_method: paymentMethodId })
+            )
+        );
+
+        const failedSubscriptions = [];
+        results.forEach((result, index) => {
+            if (result.status === 'rejected') {
+                failedSubscriptions.push({
+                    subscriptionId: String(activeSubs[index]._id),
+                    stripeSubscriptionId: activeSubs[index].stripeSubscriptionId,
+                    error: result.reason?.raw?.message || result.reason?.message || 'Update failed'
+                });
+            }
+        });
+
+        res.json({
+            message: failedSubscriptions.length
+                ? `Card saved, but ${failedSubscriptions.length} subscription(s) could not be switched automatically.`
+                : 'Payment method updated.',
+            card: {
+                brand: user.cardBrand,
+                last4: user.cardLast4,
+                expMonth: user.cardExpMonth,
+                expYear: user.cardExpYear
+            },
+            updatedSubscriptionCount: activeSubs.length - failedSubscriptions.length,
+            failedSubscriptions
+        });
+    } catch (error) {
+        console.error('Error confirming payment method update:', error);
+        const stripeMessage = error?.raw?.message || error?.message || 'Payment method update failed';
+        res.status(500).json({ message: stripeMessage });
     }
 });
 
